@@ -12,6 +12,7 @@ import httpx
 
 from parse_bik import parse_bik_pdf
 from notion_client import Client as Notion
+from notion_client.errors import APIResponseError
 
 # =========================
 # KONFIG
@@ -43,7 +44,6 @@ STATUS_DONE    = os.getenv("STATUS_DONE", "Przetworzony")
 # POMOCNICZE
 # =========================
 def rows_to_xlsx_bytes(rows: List[Dict[str, Any]]) -> bytes:
-    from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
     ws.title = "BIK_Raport"
@@ -128,64 +128,6 @@ def infer_source_from_name(name_or_url: str) -> str:
     if re.search(r"(prywat|osob)", n): return "prywatny"
     return "auto"
 
-# =========================
-# ROUTES
-# =========================
-@app.get("/")
-def root():
-    return {"ok": True, "service": "BIK PDF -> XLS", "expiring_days": LINK_TTL_DAYS}
-
-# Prosta strona HTML do kliknięcia POST /notion/poll
-@app.get("/poll-ui")
-def poll_ui():
-    html = """
-    <!DOCTYPE html>
-    <html lang="pl"><head><meta charset="utf-8"><title>Notion Poll</title></head>
-    <body style="font-family:system-ui;max-width:700px;margin:40px auto">
-      <h1>Wywołaj POST /notion/poll</h1>
-      <button id="btn" style="padding:10px 16px;font-size:16px">Uruchom</button>
-      <pre id="out" style="background:#f5f5f5;padding:12px;white-space:pre-wrap"></pre>
-      <script>
-        const btn = document.getElementById('btn');
-        const out = document.getElementById('out');
-        btn.onclick = async () => {
-          btn.disabled = true; out.textContent = 'Wysyłam...';
-          try {
-            const r = await fetch('/notion/poll', {method:'POST'});
-            const j = await r.json();
-            out.textContent = JSON.stringify(j, null, 2);
-          } catch(e) { out.textContent = 'Błąd: ' + e; }
-          btn.disabled = false;
-        };
-      </script>
-    </body></html>
-    """
-    return HTMLResponse(html)
-
-@app.get("/dl")
-def download(token: str = Query(...)):
-    filename = verify_token(token)
-    path = os.path.join(FILES_DIR, _safe_name(filename))
-    if not os.path.isfile(path):
-        raise HTTPException(404, "File not found")
-    return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        filename=os.path.basename(path))
-
-@app.post("/parse")
-async def parse_endpoint(file: UploadFile = File(...), source_label: str = "auto"):
-    if (file.content_type or "").lower() not in {"application/pdf","application/octet-stream"}:
-        raise HTTPException(400, "Prześlij plik PDF")
-    pdf_bytes = await file.read()
-    rows = parse_bik_pdf(pdf_bytes, source_label)
-    if not rows:
-        return JSONResponse({"ok": False, "rows": 0, "msg": "Brak danych w sekcji 'w trakcie spłaty'."}, status_code=422)
-    xlsx = rows_to_xlsx_bytes(rows)
-    name = f"bik_{int(time.time())}.xlsx"
-    save_file(xlsx, name)
-    url = expiring_download_url(name)
-    return {"ok": True, "url": url}
-
-# ----- NOTION BRIDGE -----
 def get_notion() -> Notion:
     if not NOTION_TOKEN:
         raise RuntimeError("Brak NOTION_TOKEN")
@@ -234,68 +176,156 @@ def insert_creditor_rows(notion: Notion, db_id: str, rows: List[Dict[str, Any]])
             }
         )
 
+# =========================
+# ROUTES
+# =========================
+@app.get("/")
+def root():
+    return {"ok": True, "service": "BIK PDF -> XLS", "expiring_days": LINK_TTL_DAYS}
+
+# Prosta stronka do kliknięcia POST /notion/poll (pokazuje także surowe błędy)
+@app.get("/poll-ui")
+def poll_ui():
+    html = """
+    <!DOCTYPE html>
+    <html lang="pl"><head><meta charset="utf-8"><title>Notion Poll</title></head>
+    <body style="font-family:system-ui;max-width:700px;margin:40px auto">
+      <h1>Wywołaj POST /notion/poll</h1>
+      <button id="btn" style="padding:10px 16px;font-size:16px">Uruchom</button>
+      <pre id="out" style="background:#f5f5f5;padding:12px;white-space:pre-wrap"></pre>
+      <script>
+        const btn = document.getElementById('btn');
+        const out = document.getElementById('out');
+        btn.onclick = async () => {
+          btn.disabled = true; out.textContent = 'Wysyłam...';
+          try {
+            const r = await fetch('/notion/poll', {method:'POST'});
+            const text = await r.text();
+            try {
+              const j = JSON.parse(text);
+              out.textContent = JSON.stringify(j, null, 2);
+            } catch(e) {
+              out.textContent = 'HTTP ' + r.status + ' ' + r.statusText + '\\n\\n' + text;
+            }
+          } catch(e) { out.textContent = 'Błąd fetch: ' + e; }
+          btn.disabled = false;
+        };
+      </script>
+    </body></html>
+    """
+    return HTMLResponse(html)
+
+@app.get("/dl")
+def download(token: str = Query(...)):
+    filename = verify_token(token)
+    path = os.path.join(FILES_DIR, _safe_name(filename))
+    if not os.path.isfile(path):
+        raise HTTPException(404, "File not found")
+    return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        filename=os.path.basename(path))
+
+@app.post("/parse")
+async def parse_endpoint(file: UploadFile = File(...), source_label: str = "auto"):
+    if (file.content_type or "").lower() not in {"application/pdf","application/octet-stream"}:
+        raise HTTPException(400, "Prześlij plik PDF")
+    pdf_bytes = await file.read()
+    rows = parse_bik_pdf(pdf_bytes, source_label)
+    if not rows:
+        return JSONResponse({"ok": False, "rows": 0, "msg": "Brak danych w sekcji 'w trakcie spłaty'."}, status_code=422)
+    xlsx = rows_to_xlsx_bytes(rows)
+    name = f"bik_{int(time.time())}.xlsx"
+    save_file(xlsx, name)
+    url = expiring_download_url(name)
+    return {"ok": True, "url": url}
+
+# ---- DIAGNOSTYKA NOTION: sprawdź czy DB_ID jest poprawny i token działa
+@app.get("/notion/db-check")
+def notion_db_check():
+    try:
+        notion = get_notion()
+        db = notion.databases.retrieve(database_id=NOTION_DB_ID)
+        # Zwróć podstawowe info (bez wrażliwych danych)
+        title = ""
+        if db.get("title"):
+            title = "".join([t.get("plain_text","") for t in db["title"]])
+        props = list(db.get("properties", {}).keys())
+        return {"ok": True, "database_id": NOTION_DB_ID, "title": title, "properties": props}
+    except APIResponseError as e:
+        return JSONResponse({"ok": False, "where": "db-check", "code": getattr(e, "code", None), "message": str(e)}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"ok": False, "where": "db-check", "message": str(e)}, status_code=500)
+
+# ----- NOTION BRIDGE -----
 @app.post("/notion/poll")
 async def notion_poll():
-    if not NOTION_DB_ID:
-        raise HTTPException(500, "Brak NOTION_DB_ID")
+    try:
+        if not NOTION_DB_ID:
+            raise RuntimeError("Brak NOTION_DB_ID")
 
-    notion = get_notion()
+        notion = get_notion()
 
-    filters = {
-        "and": [
-            {"property": PROP_PDF, "files": {"is_not_empty": True}},
-            {"or": [
-                {"property": PROP_STATUS, "select": {"equals": STATUS_NEW}},
-                {"property": PROP_XLS, "url": {"is_empty": True}},
-            ]}
-        ]
-    }
+        filters = {
+            "and": [
+                {"property": PROP_PDF, "files": {"is_not_empty": True}},
+                {"or": [
+                    {"property": PROP_STATUS, "select": {"equals": STATUS_NEW}},
+                    {"property": PROP_XLS, "url": {"is_empty": True}},
+                ]}
+            ]
+        }
 
-    pages = notion.databases.query(
-        **{"database_id": NOTION_DB_ID, "filter": filters, "page_size": 20}
-    )["results"]
+        pages = notion.databases.query(
+            **{"database_id": NOTION_DB_ID, "filter": filters, "page_size": 20}
+        )["results"]
 
-    processed = 0
+        processed = 0
 
-    for page in pages:
-        pid = page["id"]
-        props = page.get("properties", {})
-        title = get_page_title_from_properties(props)
+        for page in pages:
+            pid = page["id"]
+            props = page.get("properties", {})
+            title = get_page_title_from_properties(props)
 
-        pdf_prop = props.get(PROP_PDF, {})
-        pdf_urls = extract_file_urls_from_notion_file_prop(pdf_prop)
-        if not pdf_urls:
-            continue
+            pdf_prop = props.get(PROP_PDF, {})
+            pdf_urls = extract_file_urls_from_notion_file_prop(pdf_prop)
+            if not pdf_urls:
+                continue
 
-        all_rows: List[Dict[str, Any]] = []
-        for url in pdf_urls:
+            all_rows: List[Dict[str, Any]] = []
+            for url in pdf_urls:
+                try:
+                    pdf_bytes = await http_get_bytes(url)
+                    src = infer_source_from_name(url)
+                    all_rows.extend(parse_bik_pdf(pdf_bytes, source=src))
+                except Exception as e:
+                    print(f"[WARN] Pobieranie/parsowanie nie powiodło się dla {url}: {e}")
+
+            if not all_rows:
+                continue
+
+            xlsx_bytes = rows_to_xlsx_bytes(all_rows)
+            filename = _safe_name(f"{title}.xlsx")
+            save_file(xlsx_bytes, filename)
+            public_url = expiring_download_url(filename)
+
+            db_name = f"{title} lista wierzycieli"
             try:
-                pdf_bytes = await http_get_bytes(url)
-                src = infer_source_from_name(url)
-                all_rows.extend(parse_bik_pdf(pdf_bytes, source=src))
+                db_id = create_creditors_database(notion, parent_page_id=pid, db_name=db_name)
+                insert_creditor_rows(notion, db_id, all_rows)
             except Exception as e:
-                print(f"[WARN] Pobieranie/parsowanie nie powiodło się dla {url}: {e}")
+                print(f"[WARN] Nie udało się utworzyć bazy wierzycieli dla {title}: {e}")
 
-        if not all_rows:
-            continue
+            update_props: Dict[str, Any] = { PROP_XLS: {"url": public_url} }
+            if PROP_STATUS in props:
+                update_props[PROP_STATUS] = {"select": {"name": STATUS_DONE}}
+            notion.pages.update(page_id=pid, properties=update_props)
 
-        xlsx_bytes = rows_to_xlsx_bytes(all_rows)
-        filename = _safe_name(f"{title}.xlsx")
-        save_file(xlsx_bytes, filename)
-        public_url = expiring_download_url(filename)
+            processed += 1
 
-        db_name = f"{title} lista wierzycieli"
-        try:
-            db_id = create_creditors_database(notion, parent_page_id=pid, db_name=db_name)
-            insert_creditor_rows(notion, db_id, all_rows)
-        except Exception as e:
-            print(f"[WARN] Nie udało się utworzyć bazy wierzycieli dla {title}: {e}")
+        return {"ok": True, "processed": processed}
 
-        update_props: Dict[str, Any] = { PROP_XLS: {"url": public_url} }
-        if PROP_STATUS in props:
-            update_props[PROP_STATUS] = {"select": {"name": STATUS_DONE}}
-        notion.pages.update(page_id=pid, properties=update_props)
-
-        processed += 1
-
-    return {"ok": True, "processed": processed}
+    except APIResponseError as e:
+        # Błąd z Notion – zwróć czytelny komunikat
+        return JSONResponse({"ok": False, "where": "notion", "code": getattr(e, "code", None), "message": str(e)}, status_code=500)
+    except Exception as e:
+        # Inny błąd – zwróć ogólny komunikat
+        return JSONResponse({"ok": False, "where": "server", "message": str(e)}, status_code=500)
