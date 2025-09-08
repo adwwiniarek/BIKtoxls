@@ -45,7 +45,7 @@ PROP_CITY        = os.getenv("PROP_CITY", "Miejscowość")
 PROP_PKD         = os.getenv("PROP_PKD", "PKD")
 PROP_ADDRESS     = os.getenv("PROP_ADDRESS", "Adres")
 
-# Kolumny w tabeli „lista wierzycieli” i w XLS (tylko NIP + Adres z dodatkowych)
+# Kolumny w XLS i w „liście wierzycieli” (tylko NIP + Adres jako dodatki)
 CRED_XLS_HEADERS = [
     "Źródło","Rodzaj_produktu","Kredytodawca","Zawarcie_umowy",
     "Pierwotna_kwota","Pozostało_do_spłaty","Kwota_raty","Suma_zaległości",
@@ -287,7 +287,7 @@ async def fetch_company_data_by_nip(nip: str) -> Dict[str, Any]:
     }
 
 # =========================
-# Baza „lista wierzycieli” + osadzenie tabeli inline (tylko NIP, Adres jako dodatki)
+# Baza „lista wierzycieli” (bez żadnych bloków/linków)
 # =========================
 def create_creditors_database(notion: Notion, parent_page_id: str, db_name: str) -> str:
     db = notion.databases.create(
@@ -312,12 +312,12 @@ def create_creditors_database(notion: Notion, parent_page_id: str, db_name: str)
     )
     return db["id"]
 
-def insert_creditor_rows(notion: Notion, : str, rows: List[Dict[str, Any]]):
+def insert_creditor_rows(notion: Notion, db_id: str, rows: List[Dict[str, Any]]):
     def _rt(val: str) -> List[Dict[str, Any]]:
         return [{"type":"text","text":{"content": val}}] if val else []
     for r in rows:
         notion.pages.create(
-            parent={"database_id": },
+            parent={"database_id": db_id},
             properties={
                 "Kredytodawca": {"title":[{"type":"text","text":{"content": str(r.get("Kredytodawca",""))}}]},
                 "Źródło": {"select":{"name": str(r.get("Źródło","auto")) or "auto"}},
@@ -332,20 +332,21 @@ def insert_creditor_rows(notion: Notion, : str, rows: List[Dict[str, Any]]):
             }
         )
 
-def embed_database_inline(notion: Notion, parent_page_id: str, database_id: str, heading: Optional[str] = None):
-    blocks = []
-    if heading:
-        blocks.append({
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {"rich_text":[{"type":"text","text":{"content": heading}}]}
-        })
-    blocks.append({
-        "object": "block",
-        "type": "link_to_page",
-        "link_to_page": {"type": "database_id", "database_id": database_id}
-    })
-    notion.blocks.children.append(block_id=parent_page_id, children=blocks)
+def find_or_create_creditors_database(notion: Notion, parent_page_id: str, db_name: str) -> str:
+    # spróbuj znaleźć istniejącą bazę o tej nazwie i tym samym parent_page_id
+    try:
+        search = notion.search(query=db_name, filter={"property": "object", "value": "database"})
+        for res in search.get("results", []):
+            if res.get("object") == "database":
+                par = res.get("parent", {})
+                if par.get("type") == "page_id" and par.get("page_id") == parent_page_id:
+                    title = "".join([t.get("plain_text","") for t in res.get("title", [])]).strip()
+                    if title == db_name:
+                        return res["id"]
+    except Exception:
+        pass
+    # nie znaleziono — utwórz
+    return create_creditors_database(notion, parent_page_id=parent_page_id, db_name=db_name)
 
 # =========================
 # ROUTES
@@ -412,12 +413,12 @@ async def parse_endpoint(file: UploadFile = File(...), source_label: str = "auto
 def notion_db_check():
     try:
         notion = get_notion()
-        db = notion.databases.retrieve(database_id=NOTION_)
+        db = notion.databases.retrieve(database_id=NOTION_DB_ID)
         title = ""
         if db.get("title"):
             title = "".join([t.get("plain_text","") for t in db["title"]])
         props = list(db.get("properties", {}).keys())
-        return {"ok": True, "database_id": NOTION_, "title": title, "properties": props}
+        return {"ok": True, "database_id": NOTION_DB_ID, "title": title, "properties": props}
     except APIResponseError as e:
         return JSONResponse({"ok": False, "where": "db-check", "code": getattr(e, "code", None), "message": str(e)}, status_code=500)
     except Exception as e:
@@ -429,7 +430,7 @@ async def notion_poll():
         notion = get_notion()
         # Tylko PDF is_not_empty + XLS is_empty
         pages = notion.databases.query(
-            database_id=NOTION_,
+            database_id=NOTION_DB_ID,
             filter={
                 "and": [
                     {"property": PROP_PDF, "files": {"is_not_empty": True}},
@@ -493,13 +494,13 @@ async def notion_poll():
             save_file(xlsx_bytes, filename)
             public_url = expiring_download_url(filename)
 
-            # Baza „lista wierzycieli” + widok inline
+            # Baza „lista wierzycieli” – bez osadzania/bez linków
             db_name = f"{title} lista wierzycieli"
             try:
-                db_id = create_creditors_database(notion, parent_page_id=pid, db_name=db_name)
-insert_creditor_rows(notion, db_id, all_rows)
+                db_id = find_or_create_creditors_database(notion, parent_page_id=pid, db_name=db_name)
+                insert_creditor_rows(notion, db_id, all_rows)
             except Exception as e:
-                print(f"[WARN] Nie udało się utworzyć/wstawić bazy wierzycieli dla {title}: {e}")
+                print(f"[WARN] Nie udało się utworzyć/wypełnić bazy wierzycieli dla {title}: {e}")
 
             # Link do XLS
             notion.pages.update(page_id=pid, properties={PROP_XLS: {"url": public_url}})
