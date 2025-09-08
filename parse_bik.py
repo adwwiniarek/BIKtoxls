@@ -42,16 +42,17 @@ def _product_line(lines, j_above):
 
 def _parse_tok(tok, pos):
     up = tok.upper().strip()
-    if up == "ND":   return None                 # ND → puste (tylko rata)
-    if up == "BRAK": return 0.0 if pos == 3 else None  # BRAK → 0 tylko dla zaległości
+    if up == "ND":   return None
+    if up == "BRAK": return 0.0 if pos == 3 else None
     t = up.replace("PLN","").replace("\u00a0"," ").replace(" ","")
     t = t.replace(".","").replace(",",".")
     try: return float(t)
     except: return None
 
 def _collect4(lines, start_idx, window=6):
+    import re as _re
     chunk = " ".join(lines[start_idx:start_idx+window])
-    toks = re.findall(r"\d{1,3}(?:[\.\s]\d{3})*(?:,\d+)?\s*PLN|ND|BRAK", chunk, re.I)
+    toks = _re.findall(r"\d{1,3}(?:[\.\s]\d{3})*(?:,\d+)?\s*PLN|ND|BRAK", chunk, _re.I)
     toks = toks[:4] + [None]*(4-len(toks))
     return [_parse_tok(t, i) if t else None for i,t in enumerate(toks)]
 
@@ -63,7 +64,6 @@ def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
             data = l.split()[0]
             lender, j = _lender_block(lines, i)
             product = _product_line(lines, j)
-
             k1,k2,k3,k4 = _collect4(lines, i, window=6)
 
             import re as _re
@@ -77,7 +77,7 @@ def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
                 "Zawarcie_umowy": data,
                 "Pierwotna_kwota": k1,
                 "Pozostało_do_spłaty": k2,
-                "Kwota_raty": k3,          # ND -> puste
-                "Suma_zaległości": k4,     # BRAK -> 0
+                "Kwota_raty": k3,
+                "Suma_zaległości": k4,
             })
     return rows
