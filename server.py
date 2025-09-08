@@ -2,7 +2,9 @@ import os, io, re, json, time, hmac, base64
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import (
+    StreamingResponse, JSONResponse, FileResponse, HTMLResponse
+)
 from fastapi.staticfiles import StaticFiles
 
 from openpyxl import Workbook
@@ -132,6 +134,33 @@ def infer_source_from_name(name_or_url: str) -> str:
 @app.get("/")
 def root():
     return {"ok": True, "service": "BIK PDF -> XLS", "expiring_days": LINK_TTL_DAYS}
+
+# Prosta strona HTML do kliknięcia POST /notion/poll
+@app.get("/poll-ui")
+def poll_ui():
+    html = """
+    <!DOCTYPE html>
+    <html lang="pl"><head><meta charset="utf-8"><title>Notion Poll</title></head>
+    <body style="font-family:system-ui;max-width:700px;margin:40px auto">
+      <h1>Wywołaj POST /notion/poll</h1>
+      <button id="btn" style="padding:10px 16px;font-size:16px">Uruchom</button>
+      <pre id="out" style="background:#f5f5f5;padding:12px;white-space:pre-wrap"></pre>
+      <script>
+        const btn = document.getElementById('btn');
+        const out = document.getElementById('out');
+        btn.onclick = async () => {
+          btn.disabled = true; out.textContent = 'Wysyłam...';
+          try {
+            const r = await fetch('/notion/poll', {method:'POST'});
+            const j = await r.json();
+            out.textContent = JSON.stringify(j, null, 2);
+          } catch(e) { out.textContent = 'Błąd: ' + e; }
+          btn.disabled = false;
+        };
+      </script>
+    </body></html>
+    """
+    return HTMLResponse(html)
 
 @app.get("/dl")
 def download(token: str = Query(...)):
