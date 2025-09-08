@@ -312,12 +312,12 @@ def create_creditors_database(notion: Notion, parent_page_id: str, db_name: str)
     )
     return db["id"]
 
-def insert_creditor_rows(notion: Notion, db_id: str, rows: List[Dict[str, Any]]):
+def insert_creditor_rows(notion: Notion, : str, rows: List[Dict[str, Any]]):
     def _rt(val: str) -> List[Dict[str, Any]]:
         return [{"type":"text","text":{"content": val}}] if val else []
     for r in rows:
         notion.pages.create(
-            parent={"database_id": db_id},
+            parent={"database_id": },
             properties={
                 "Kredytodawca": {"title":[{"type":"text","text":{"content": str(r.get("Kredytodawca",""))}}]},
                 "Źródło": {"select":{"name": str(r.get("Źródło","auto")) or "auto"}},
@@ -412,12 +412,12 @@ async def parse_endpoint(file: UploadFile = File(...), source_label: str = "auto
 def notion_db_check():
     try:
         notion = get_notion()
-        db = notion.databases.retrieve(database_id=NOTION_DB_ID)
+        db = notion.databases.retrieve(database_id=NOTION_)
         title = ""
         if db.get("title"):
             title = "".join([t.get("plain_text","") for t in db["title"]])
         props = list(db.get("properties", {}).keys())
-        return {"ok": True, "database_id": NOTION_DB_ID, "title": title, "properties": props}
+        return {"ok": True, "database_id": NOTION_, "title": title, "properties": props}
     except APIResponseError as e:
         return JSONResponse({"ok": False, "where": "db-check", "code": getattr(e, "code", None), "message": str(e)}, status_code=500)
     except Exception as e:
@@ -429,7 +429,7 @@ async def notion_poll():
         notion = get_notion()
         # Tylko PDF is_not_empty + XLS is_empty
         pages = notion.databases.query(
-            database_id=NOTION_DB_ID,
+            database_id=NOTION_,
             filter={
                 "and": [
                     {"property": PROP_PDF, "files": {"is_not_empty": True}},
@@ -497,8 +497,7 @@ async def notion_poll():
             db_name = f"{title} lista wierzycieli"
             try:
                 db_id = create_creditors_database(notion, parent_page_id=pid, db_name=db_name)
-                insert_creditor_rows(notion, db_id, all_rows)
-                embed_database_inline(notion, parent_page_id=pid, database_id=db_id, heading="Lista wierzycieli")
+insert_creditor_rows(notion, db_id, all_rows)
             except Exception as e:
                 print(f"[WARN] Nie udało się utworzyć/wstawić bazy wierzycieli dla {title}: {e}")
 
