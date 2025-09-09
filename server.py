@@ -386,6 +386,39 @@ def poll_ui():
     """
     return HTMLResponse(html)
 
+@app.get("/enrich-ui")
+def enrich_ui():
+    html = """
+    <!DOCTYPE html>
+    <html lang="pl">
+    <head><meta charset="utf-8"><title>Notion Enrich</title></head>
+    <body style="font-family:system-ui;max-width:700px;margin:40px auto">
+      <h1>Wywołaj POST /notion/enrich</h1>
+      <button id="btn" style="padding:10px 16px;font-size:16px">Uruchom enrich</button>
+      <pre id="out" style="background:#f5f5f5;padding:12px;white-space:pre-wrap"></pre>
+      <script>
+        const btn = document.getElementById('btn');
+        const out = document.getElementById('out');
+        btn.onclick = async () => {
+          btn.disabled = true; out.textContent = 'Wysyłam...';
+          try {
+            const r = await fetch('/notion/enrich', {method:'POST'});
+            const text = await r.text();
+            try {
+              const j = JSON.parse(text);
+              out.textContent = JSON.stringify(j, null, 2);
+            } catch(e) {
+              out.textContent = 'HTTP ' + r.status + ' ' + r.statusText + '\\n\\n' + text;
+            }
+          } catch(e) { out.textContent = 'Błąd fetch: ' + e; }
+          btn.disabled = false;
+        };
+      </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
+
 @app.get("/dl")
 def download(token: str = Query(...)):
     filename = verify_token(token)
