@@ -1,7 +1,7 @@
 import os, io, re, time, hmac, base64
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -34,13 +34,13 @@ if not DL_SECRET:
 NOTION_TOKEN   = os.getenv("NOTION_TOKEN", "")
 NOTION_DB_ID   = os.getenv("NOTION_DB_ID", "")
 
-# Nazwy kolumn w bazie Klientów (Notion) – tylko to, co potrzebne tutaj
-PROP_PDF         = os.getenv("PROP_PDF", "PDF")    # Files & media
+# Nazwy kolumn w bazie Klientów (Notion)
+PROP_PDF         = os.getenv("PROP_PDF", "PDF")    # np. "Raporty BIK"
 PROP_XLS         = os.getenv("PROP_XLS", "XLS")    # URL
 PROP_NIP_MAIN    = os.getenv("PROP_NIP_MAIN", "NIP")
 PROP_PESEL_MAIN  = os.getenv("PROP_PESEL_MAIN", "PESEL")
 
-# Kolumny w XLS i w „liście wierzycieli” (zostawiamy jak w stabilnej fazie)
+# Kolumny w XLS i w „liście wierzycieli”
 CRED_XLS_HEADERS = [
     "Źródło","Rodzaj_produktu","Kredytodawca","Zawarcie_umowy",
     "Pierwotna_kwota","Pozostało_do_spłaty","Kwota_raty","Suma_zaległości",
@@ -100,7 +100,8 @@ def expiring_download_url(filename: str) -> str:
     return f"{PUBLIC_BASE_URL}/dl?token={token}"
 
 async def http_get_bytes(url: str) -> bytes:
-    async with httpx.AsyncClient(timeout=90) as cx:
+    # Krótki timeout + follow redirects (Notion), bez proxy z env
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, trust_env=False) as cx:
         r = await cx.get(url)
         r.raise_for_status()
         return r.content
@@ -240,7 +241,7 @@ def detect_source_and_ids(pdf_bytes: bytes) -> Dict[str, Optional[str]]:
     return {"source": src, "nip": found_nip, "pesel": found_pesel}
 
 # =========================
-# Baza „lista wierzycieli” (bez żadnych bloków/linków)
+# Baza „lista wierzycieli”
 # =========================
 def create_creditors_database(notion: Notion, parent_page_id: str, db_name: str) -> str:
     db = notion.databases.create(
@@ -285,7 +286,6 @@ def insert_creditor_rows(notion: Notion, db_id: str, rows: List[Dict[str, Any]])
         )
 
 def find_or_create_creditors_database(notion: Notion, parent_page_id: str, db_name: str) -> str:
-    # spróbuj znaleźć istniejącą bazę o tej nazwie i tym samym parent_page_id
     try:
         search = notion.search(query=db_name, filter={"property": "object", "value": "database"})
         for res in search.get("results", []):
@@ -297,23 +297,27 @@ def find_or_create_creditors_database(notion: Notion, parent_page_id: str, db_na
                         return res["id"]
     except Exception:
         pass
-    # nie znaleziono — utwórz
     return create_creditors_database(notion, parent_page_id=parent_page_id, db_name=db_name)
 
 # =========================
 # ROUTES
 # =========================
-@app.get("/")
-def root():
+@app.api_route("/", methods=["GET", "HEAD"])
+def root(request: Request):
+    if request.method == "HEAD":
+        return HTMLResponse(status_code=200)
     return {"ok": True, "service": "BIK PDF -> XLS (stabilny)", "expiring_days": LINK_TTL_DAYS}
 
-@app.get("/poll-ui")
-def poll_ui():
+@app.api_route("/poll-ui", methods=["GET", "HEAD"])
+def poll_ui(request: Request):
+    if request.method == "HEAD":
+        return HTMLResponse(status_code=200)
     html = """
     <!DOCTYPE html>
     <html lang="pl"><head><meta charset="utf-8"><title>Notion Poll</title></head>
     <body style="font-family:system-ui;max-width:700px;margin:40px auto">
       <h1>Wywołaj POST /notion/poll</h1>
+      <p style="color:#666">Pracuję maksymalnie 60 s i do 10 rekordów na przebieg (możesz zmienić w URL).</p>
       <button id="btn" style="padding:10px 16px;font-size:16px">Uruchom</button>
       <pre id="out" style="background:#f5f5f5;padding:12px;white-space:pre-wrap"></pre>
       <script>
@@ -322,14 +326,10 @@ def poll_ui():
         btn.onclick = async () => {
           btn.disabled = true; out.textContent = 'Wysyłam...';
           try {
-            const r = await fetch('/notion/poll', {method:'POST'});
+            const r = await fetch('/notion/poll?max_pages=10&max_seconds=60', {method:'POST'});
             const text = await r.text();
-            try {
-              const j = JSON.parse(text);
-              out.textContent = JSON.stringify(j, null, 2);
-            } catch(e) {
-              out.textContent = 'HTTP ' + r.status + ' ' + r.statusText + '\\n\\n' + text;
-            }
+            try { out.textContent = JSON.stringify(JSON.parse(text), null, 2); }
+            catch(e) { out.textContent = 'HTTP ' + r.status + ' ' + r.statusText + '\\n\\n' + text; }
           } catch(e) { out.textContent = 'Błąd fetch: ' + e; }
           btn.disabled = false;
         };
@@ -337,6 +337,10 @@ def poll_ui():
     </body></html>
     """
     return HTMLResponse(html)
+
+@app.api_route("/health", methods=["GET", "HEAD"])
+def health(request: Request):
+    return HTMLResponse(status_code=200)
 
 @app.get("/dl")
 def download(token: str = Query(...)):
@@ -376,8 +380,9 @@ def notion_db_check():
     except Exception as e:
         return JSONResponse({"ok": False, "where": "db-check", "message": str(e)}, status_code=500)
 
-@app.post("/notion/poll")
-async def notion_poll():
+# ---- podgląd kolejki bez pobierania ----
+@app.get("/notion/poll-lite")
+def notion_poll_lite(max_pages: int = 10):
     try:
         notion = get_notion()
         pages = notion.databases.query(
@@ -388,11 +393,52 @@ async def notion_poll():
                     {"property": PROP_XLS, "url": {"is_empty": True}},
                 ]
             },
-            page_size=20
+            page_size=max_pages
         )["results"]
 
-        processed = 0
+        preview = []
         for page in pages:
+            pid = page["id"]
+            props = page.get("properties", {})
+            title = get_page_title_from_properties(props)
+            pdf_prop = props.get(PROP_PDF, {})
+            pdf_urls = extract_file_urls_from_notion_file_prop(pdf_prop)
+            preview.append({
+                "page_id": pid,
+                "title": title,
+                "pdf_count": len(pdf_urls),
+                "first_pdf": pdf_urls[0] if pdf_urls else None
+            })
+        return {"ok": True, "count": len(preview), "items": preview}
+    except Exception as e:
+        return JSONResponse({"ok": False, "where": "poll-lite", "message": str(e)}, status_code=500)
+
+# ---- główne przetwarzanie z limitami czasu/stron ----
+@app.post("/notion/poll")
+async def notion_poll(max_pages: int = Query(10), max_seconds: int = Query(60)):
+    try:
+        notion = get_notion()
+        q = notion.databases.query(
+            database_id=NOTION_DB_ID,
+            filter={
+                "and": [
+                    {"property": PROP_PDF, "files": {"is_not_empty": True}},
+                    {"property": PROP_XLS, "url": {"is_empty": True}},
+                ]
+            },
+            page_size=max_pages
+        )
+        pages = q["results"][:max_pages]
+
+        deadline = time.monotonic() + max_seconds
+        processed = 0
+
+        print(f"[POLL] Start: {len(pages)} stron do obróbki, limit sekund = {max_seconds}")
+
+        for page in pages:
+            if time.monotonic() > deadline:
+                break
+
             pid = page["id"]
             props = page.get("properties", {})
             title = get_page_title_from_properties(props)
@@ -401,33 +447,41 @@ async def notion_poll():
             if not pdf_urls:
                 continue
 
+            print(f"[POLL] {title}: {len(pdf_urls)} plik(ów) PDF")
+
             all_rows: List[Dict[str, Any]] = []
             page_nip: Optional[str] = None
             page_pesel: Optional[str] = None
 
             for url in pdf_urls:
+                if time.monotonic() > deadline:
+                    break
                 try:
                     pdf_bytes = await http_get_bytes(url)
-                    info = detect_source_and_ids(pdf_bytes)
-                    src   = info["source"]
-                    nip   = info["nip"]
-                    pesel = info["pesel"]
-
-                    parsed = parse_bik_pdf(pdf_bytes, source=src)
-
-                    # dopisz NIP do wierszy jeśli firmowy i NIP znaleziony
-                    if nip and src == "firmowy":
-                        for r in parsed:
-                            r["NIP"] = nip
-                    all_rows.extend(parsed)
-
-                    if nip and not page_nip:
-                        page_nip = nip
-                    if pesel and not page_pesel:
-                        page_pesel = pesel
-
                 except Exception as e:
-                    print(f"[WARN] Pobieranie/parsowanie nie powiodło się dla {url}: {e}")
+                    print(f"[WARN] Timeout/błąd pobierania {url}: {e}")
+                    continue
+
+                info = detect_source_and_ids(pdf_bytes)
+                src   = info["source"]
+                nip   = info["nip"]
+                pesel = info["pesel"]
+
+                try:
+                    parsed = parse_bik_pdf(pdf_bytes, source=src)
+                except Exception as e:
+                    print(f"[WARN] Parsowanie nie powiodło się dla {title}: {e}")
+                    continue
+
+                if nip and src == "firmowy":
+                    for r in parsed:
+                        r["NIP"] = nip
+                    if not page_nip:
+                        page_nip = nip
+                if pesel and not page_pesel:
+                    page_pesel = pesel
+
+                all_rows.extend(parsed)
 
             if not all_rows:
                 continue
@@ -438,7 +492,7 @@ async def notion_poll():
             save_file(xlsx_bytes, filename)
             public_url = expiring_download_url(filename)
 
-            # Baza „lista wierzycieli” – bez osadzania/bez linków
+            # Baza „lista wierzycieli”
             db_name = f"{title} lista wierzycieli"
             try:
                 db_id = find_or_create_creditors_database(notion, parent_page_id=pid, db_name=db_name)
@@ -449,7 +503,7 @@ async def notion_poll():
             # Link do XLS
             notion.pages.update(page_id=pid, properties={PROP_XLS: {"url": public_url}})
 
-            # Uzupełnij NIP/PESEL w karcie klienta (tylko jeśli puste)
+            # Uzupełnij NIP/PESEL (jeśli puste)
             page_after = notion.pages.retrieve(page_id=pid)
             props_after = page_after.get("properties", {})
             if page_nip:
@@ -459,7 +513,8 @@ async def notion_poll():
 
             processed += 1
 
-        return {"ok": True, "processed": processed}
+        print(f"[POLL] Done: processed={processed}, time_limited={time.monotonic() > deadline}")
+        return {"ok": True, "processed": processed, "time_limited": time.monotonic() > deadline}
     except APIResponseError as e:
         return JSONResponse({"ok": False, "where": "notion", "code": getattr(e, "code", None), "message": str(e)}, status_code=500)
     except Exception as e:
