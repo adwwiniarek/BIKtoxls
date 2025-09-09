@@ -318,7 +318,8 @@ def poll_ui():
     <!DOCTYPE html>
     <html lang="pl"><head><meta charset="utf-8"><title>Notion Poll</title></head>
     <body style="font-family:system-ui;max-width:700px;margin:40px auto">
-      <h1>Gerator XLS na podstawie raportów BIK (pdf). Wywołaj POST /notion/poll</h1>
+      <h1>Gerator XLS na podstawie raportów BIK (pdf). 
+6ad9e01 Wywołaj POST /notion/poll</h1>
       <button id="btn" style="padding:10px 16px;font-size:16px">Uruchom</button>
       <pre id="out" style="background:#f5f5f5;padding:12px;white-space:pre-wrap"></pre>
       <script>
