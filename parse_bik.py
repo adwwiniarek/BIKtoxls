@@ -3,22 +3,11 @@ import re
 import fitz  # PyMuPDF
 from typing import List, Dict, Any, Optional
 
-UPPER_RE = re.compile(r"^[^a-ząćęłńóśżź]+$")  # linia bez małych PL, traktujemy jako WIERZYCIEL
+UPPER_RE = re.compile(r"^[^a-ząćęłńóśżź]+$")  # linia bez małych – traktujemy jako WIERZYCIEL (CAPS)
 SPACES_RE = re.compile(r"\s+")
 NUM_RE = re.compile(r"[-+]?[0-9][0-9\s]*([.,][0-9]{1,2})?")
 
 HEAD_IN_PROGRESS = "Zobowiązania finansowe - w trakcie spłaty"
-
-COL_MAP = {
-    "Typ": "Rodzaj_produktu",
-    "Zawarcie umowy": "Zawarcie_umowy",
-    "Pierwotna kwota": "Pierwotna_kwota",
-    "Pozostało do spłaty": "Pozostało_do_spłaty",
-    "Kwota raty": "Kwota_raty",
-    "Suma zaległości": "Suma_zaległości",
-    # "Historia spłacania" – ignorujemy
-    # "Ostatnia płatność" – ignorujemy
-}
 
 def _clean_line(s: str) -> str:
     s = s.replace("\t", " ")
@@ -44,16 +33,10 @@ def _num(s: Optional[str]) -> Optional[float]:
         return None
 
 def _extract_table_rows(text_lines: List[str]) -> List[Dict[str, Any]]:
-    """
-    Szukamy sekcji 'Zobowiązania finansowe - w trakcie spłaty', a pod nią tabeli.
-    Każdy rekord zaczyna się od linii z WIERZYCIELEM (CAPS), przy czym linia wyżej to Rodzaj_produktu.
-    Następnie w tej samej lub kolejnych liniach występują kolumny kwotowe i daty.
-    """
     rows: List[Dict[str, Any]] = []
     in_section = False
     last_product: Optional[str] = None
 
-    # Połączmy tekst w logiczne bloki, ale trzymajmy liniowość
     for i, raw in enumerate(text_lines):
         line = _clean_line(raw)
 
@@ -65,17 +48,12 @@ def _extract_table_rows(text_lines: List[str]) -> List[Dict[str, Any]]:
         if not line:
             continue
 
-        # detekcja wierzyciela (CAPS)
+        # wierzyciel – linia CAPS
         if UPPER_RE.match(line) and len(line) > 3:
             creditor = line
-            # Produkt to linia poprzednia, jeśli nie CAPS
             product = last_product or ""
-            # reset last_product po użyciu
             last_product = None
 
-            # próbujemy w kolejnych kilku liniach zebrać pola tabeli
-            # wzorzec: data + 4 wartości (pierwotna, pozostało, rata, zaległość)
-            # często są w jednej lub dwóch liniach
             z = {
                 "Rodzaj_produktu": product,
                 "Kredytodawca": creditor,
@@ -85,21 +63,18 @@ def _extract_table_rows(text_lines: List[str]) -> List[Dict[str, Any]]:
                 "Kwota_raty": None,
                 "Suma_zaległości": None,
             }
-            # spójrzmy do przodu w 1–3 liniach
+
+            # spójrzmy 1–3 linii do przodu po datę + kwoty
             for j in range(1, 4):
                 if i + j >= len(text_lines): break
                 nxt = _clean_line(text_lines[i + j])
                 if not nxt: continue
 
-                # szukamy daty (format dd.mm.rrrr)
                 mdate = re.search(r"\b\d{2}\.\d{2}\.\d{4}\b", nxt)
                 if mdate and not z["Zawarcie_umowy"]:
                     z["Zawarcie_umowy"] = mdate.group(0)
 
-                # wyciągamy do 4 wartości liczbowych
                 nums = [x.group(0) for x in NUM_RE.finditer(nxt)]
-                # Spróbuj dopasować do kolumn: Pierwotna, Pozostało, Rata, Zaległość
-                # bierzemy pierwsze 4 (lub mniej) zgodnie z kolejnością
                 if nums:
                     if z["Pierwotna_kwota"] is None and len(nums) >= 1:
                         z["Pierwotna_kwota"] = _num(nums[0])
@@ -110,7 +85,6 @@ def _extract_table_rows(text_lines: List[str]) -> List[Dict[str, Any]]:
                     if z["Suma_zaległości"] is None and len(nums) >= 4:
                         z["Suma_zaległości"] = _num(nums[3])
 
-                # jeśli zebraliśmy już core, przerywamy
                 done_core = (
                     z["Zawarcie_umowy"] and
                     (z["Pierwotna_kwota"] is not None or z["Pozostało_do_spłaty"] is not None)
@@ -118,20 +92,20 @@ def _extract_table_rows(text_lines: List[str]) -> List[Dict[str, Any]]:
                 if done_core:
                     break
 
-            # domknięcia ND/BRAK
             if z["Kwota_raty"] is None:
-                z["Kwota_raty"] = None  # zostaw puste gdy ND
+                z["Kwota_raty"] = None
             if z["Suma_zaległości"] is None:
-                z["Suma_zaległości"] = 0.0  # traktuj brak jako 0 (z Twoich zasad)
+                z["Suma_zaległości"] = 0.0
 
             rows.append(z)
             continue
 
-        # jeśli to nie CAPS i nie pusta linia — kandydat na Rodzaj_produktu
-        # (zapamiętujemy, ale użyjemy go dopiero przy najbliższym wierzycielu)
+        # kandydat na Rodzaj_produktu – linia nie-CAPS, omijamy nagłówki/legendy
         if not UPPER_RE.match(line):
-            # unikaj wartości-śmieci typu nagłówki kolumn
-            if not any(k.lower() in line.lower() for k in ["zawarcie", "pierwotna", "pozostało", "kwota raty", "suma zaległości", "historia", "ostatnia płatność", "łącznie"]):
+            if not any(k.lower() in line.lower() for k in [
+                "zawarcie", "pierwotna", "pozostało", "kwota raty",
+                "suma zaległości", "historia", "ostatnia płatność", "łącznie"
+            ]):
                 last_product = line
 
     return rows
@@ -150,10 +124,9 @@ def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]
 
     rows = _extract_table_rows(lines)
 
-    # Uzupełnij Źródło + normalizacja pustych/ND/BRAK
     out: List[Dict[str, Any]] = []
     for r in rows:
-        o = {
+        out.append({
             "Źródło": source,
             "Rodzaj_produktu": r.get("Rodzaj_produktu","") or "",
             "Kredytodawca": r.get("Kredytodawca","") or "",
@@ -164,6 +137,5 @@ def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]
             "Suma_zaległości": r.get("Suma_zaległości", 0.0),
             "NIP": "",
             "Adres": "",
-        }
-        out.append(o)
+        })
     return out
