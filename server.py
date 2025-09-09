@@ -16,7 +16,7 @@ from notion_client.errors import APIResponseError
 # =========================
 # KONFIG
 # =========================
-app = FastAPI(title="BIK PDF -> XLS (Notion bridge + expiring links)")
+app = FastAPI(title="BIK PDF -> XLS (stabilny)")
 
 FILES_DIR = os.getenv("FILES_DIR", "files")
 os.makedirs(FILES_DIR, exist_ok=True)
@@ -34,18 +34,13 @@ if not DL_SECRET:
 NOTION_TOKEN   = os.getenv("NOTION_TOKEN", "")
 NOTION_DB_ID   = os.getenv("NOTION_DB_ID", "")
 
-# Nazwy kolumn w głównej bazie Klientów (Notion)
+# Nazwy kolumn w bazie Klientów (Notion) – tylko to, co potrzebne tutaj
 PROP_PDF         = os.getenv("PROP_PDF", "PDF")    # Files & media
 PROP_XLS         = os.getenv("PROP_XLS", "XLS")    # URL
 PROP_NIP_MAIN    = os.getenv("PROP_NIP_MAIN", "NIP")
 PROP_PESEL_MAIN  = os.getenv("PROP_PESEL_MAIN", "PESEL")
-PROP_FIRMA_NAME  = os.getenv("PROP_FIRMA_NAME", "Nazwa_firmy")
-PROP_REGON       = os.getenv("PROP_REGON", "REGON")
-PROP_CITY        = os.getenv("PROP_CITY", "Miejscowość")
-PROP_PKD         = os.getenv("PROP_PKD", "PKD")
-PROP_ADDRESS     = os.getenv("PROP_ADDRESS", "Adres")
 
-# Kolumny w XLS i w „liście wierzycieli” (tylko NIP + Adres jako dodatki)
+# Kolumny w XLS i w „liście wierzycieli” (zostawiamy jak w stabilnej fazie)
 CRED_XLS_HEADERS = [
     "Źródło","Rodzaj_produktu","Kredytodawca","Zawarcie_umowy",
     "Pierwotna_kwota","Pozostało_do_spłaty","Kwota_raty","Suma_zaległości",
@@ -59,10 +54,9 @@ def rows_to_xlsx_bytes(rows: List[Dict[str, Any]]) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "BIK_Raport"
-    headers = CRED_XLS_HEADERS
-    ws.append(headers)
+    ws.append(CRED_XLS_HEADERS)
     for r in rows:
-        ws.append([r.get(h, "") for h in headers])
+        ws.append([r.get(h, "") for h in CRED_XLS_HEADERS])
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.read()
 
@@ -181,7 +175,7 @@ def set_page_text_prop_if_empty(notion: Notion, page_id: str, props: Dict[str, A
             field_name: {"title":[{"type":"text","text":{"content": value}}]}
         })
     elif t == "number":
-        if value.isdigit():
+        if str(value).isdigit():
             notion.pages.update(page_id=page_id, properties={ field_name: {"number": float(value)} })
     else:
         notion.pages.update(page_id=page_id, properties={
@@ -189,7 +183,7 @@ def set_page_text_prop_if_empty(notion: Notion, page_id: str, props: Dict[str, A
         })
 
 # =========================
-# PDF → źródło + NIP/PESEL
+# Źródło + NIP/PESEL z PDF (pierwsza strona)
 # =========================
 NIP_CLEAN_RE   = re.compile(r"[^0-9]")
 NIP_FIND_RE    = re.compile(r"\bNIP[:\s]*([0-9]{10}|[0-9]{3}[-\s]?[0-9]{3}[-\s]?[0-9]{2}[-\s]?[0-9]{2})\b")
@@ -246,47 +240,6 @@ def detect_source_and_ids(pdf_bytes: bytes) -> Dict[str, Optional[str]]:
     return {"source": src, "nip": found_nip, "pesel": found_pesel}
 
 # =========================
-# Firma po NIP (API officeblog.pl) – Nazwa, REGON, Miejscowość, PKD, Adres
-# =========================
-async def fetch_company_data_by_nip(nip: str) -> Dict[str, Any]:
-    import xml.etree.ElementTree as ET
-    url = "https://api.officeblog.pl/gus.php"
-    params = {"NIP": nip, "format": "2"}
-    headers = {"Accept": "application/xml"}
-    async with httpx.AsyncClient(timeout=30) as cx:
-        r = await cx.get(url, params=params, headers=headers)
-        r.raise_for_status()
-        xml_text = r.text
-
-    def get_first(el: ET.Element, names: list[str]) -> Optional[str]:
-        for n in names:
-            x = el.find(".//" + n)
-            if x is not None and (x.text or "").strip():
-                return x.text.strip()
-        return None
-
-    root = ET.fromstring(xml_text)
-    nazwa = get_first(root, ["Nazwa", "NazwaPodmiotu", "nazwa", "NazwaPelna", "NazwaJednostki"])
-    regon = get_first(root, ["REGON", "Regon", "regon"])
-    miasto = get_first(root, ["Miejscowosc", "Miejscowość", "Miasto", "gmina", "Powiat"])
-    pkd    = get_first(root, ["PKD", "PKDGlowny", "PKD_PrzedmiotDzialalnosci"])
-    ulica  = get_first(root, ["Ulica","ulica"])
-    nrdom  = get_first(root, ["NrNieruchomosci","NumerNieruchomosci","NrDomu","nrdomu"])
-    nrlok  = get_first(root, ["NrLokalu","NumerLokalu","nrlokalu"])
-    kod    = get_first(root, ["KodPocztowy","Kod","kod"])
-    miejsc = miasto or ""
-    parts = [p for p in [ulica, nrdom, (("/" + nrlok) if nrlok else None), kod, miejsc] if p]
-    adres = ", ".join([p for p in parts if p])
-
-    return {
-        "Nazwa_firmy": nazwa or f"Firma {nip}",
-        "REGON": regon or "",
-        "Miejscowość": miejsc,
-        "PKD": pkd or "",
-        "Adres": adres,
-    }
-
-# =========================
 # Baza „lista wierzycieli” (bez żadnych bloków/linków)
 # =========================
 def create_creditors_database(notion: Notion, parent_page_id: str, db_name: str) -> str:
@@ -313,8 +266,7 @@ def create_creditors_database(notion: Notion, parent_page_id: str, db_name: str)
     return db["id"]
 
 def insert_creditor_rows(notion: Notion, db_id: str, rows: List[Dict[str, Any]]):
-    def _rt(val: str) -> List[Dict[str, Any]]:
-        return [{"type":"text","text":{"content": val}}] if val else []
+    def _rt(val: str): return [{"type":"text","text":{"content": val}}] if val else []
     for r in rows:
         notion.pages.create(
             parent={"database_id": db_id},
@@ -353,7 +305,7 @@ def find_or_create_creditors_database(notion: Notion, parent_page_id: str, db_na
 # =========================
 @app.get("/")
 def root():
-    return {"ok": True, "service": "BIK PDF -> XLS", "expiring_days": LINK_TTL_DAYS}
+    return {"ok": True, "service": "BIK PDF -> XLS (stabilny)", "expiring_days": LINK_TTL_DAYS}
 
 @app.get("/poll-ui")
 def poll_ui():
@@ -383,39 +335,6 @@ def poll_ui():
         };
       </script>
     </body></html>
-    """
-    return HTMLResponse(html)
-
-@app.get("/enrich-ui")
-def enrich_ui():
-    html = """
-    <!DOCTYPE html>
-    <html lang="pl">
-    <head><meta charset="utf-8"><title>Notion Enrich</title></head>
-    <body style="font-family:system-ui;max-width:700px;margin:40px auto">
-      <h1>Wywołaj POST /notion/enrich</h1>
-      <button id="btn" style="padding:10px 16px;font-size:16px">Uruchom enrich</button>
-      <pre id="out" style="background:#f5f5f5;padding:12px;white-space:pre-wrap"></pre>
-      <script>
-        const btn = document.getElementById('btn');
-        const out = document.getElementById('out');
-        btn.onclick = async () => {
-          btn.disabled = true; out.textContent = 'Wysyłam...';
-          try {
-            const r = await fetch('/notion/enrich', {method:'POST'});
-            const text = await r.text();
-            try {
-              const j = JSON.parse(text);
-              out.textContent = JSON.stringify(j, null, 2);
-            } catch(e) {
-              out.textContent = 'HTTP ' + r.status + ' ' + r.statusText + '\\n\\n' + text;
-            }
-          } catch(e) { out.textContent = 'Błąd fetch: ' + e; }
-          btn.disabled = false;
-        };
-      </script>
-    </body>
-    </html>
     """
     return HTMLResponse(html)
 
@@ -461,7 +380,6 @@ def notion_db_check():
 async def notion_poll():
     try:
         notion = get_notion()
-        # Tylko PDF is_not_empty + XLS is_empty
         pages = notion.databases.query(
             database_id=NOTION_DB_ID,
             filter={
@@ -486,7 +404,6 @@ async def notion_poll():
             all_rows: List[Dict[str, Any]] = []
             page_nip: Optional[str] = None
             page_pesel: Optional[str] = None
-            company_data: Optional[Dict[str, Any]] = None
 
             for url in pdf_urls:
                 try:
@@ -498,23 +415,17 @@ async def notion_poll():
 
                     parsed = parse_bik_pdf(pdf_bytes, source=src)
 
+                    # dopisz NIP do wierszy jeśli firmowy i NIP znaleziony
                     if nip and src == "firmowy":
-                        if not company_data:
-                            try:
-                                company_data = await fetch_company_data_by_nip(nip)
-                            except Exception as e:
-                                print(f"[WARN] fetch_company_data_by_nip({nip}) failed: {e}")
-                                company_data = None
                         for r in parsed:
                             r["NIP"] = nip
-                            if company_data:
-                                r["Adres"] = company_data.get("Adres","")
-                        page_nip = page_nip or nip
-
-                    if pesel and src == "prywatny":
-                        page_pesel = page_pesel or pesel
-
                     all_rows.extend(parsed)
+
+                    if nip and not page_nip:
+                        page_nip = nip
+                    if pesel and not page_pesel:
+                        page_pesel = pesel
+
                 except Exception as e:
                     print(f"[WARN] Pobieranie/parsowanie nie powiodło się dla {url}: {e}")
 
@@ -538,19 +449,13 @@ async def notion_poll():
             # Link do XLS
             notion.pages.update(page_id=pid, properties={PROP_XLS: {"url": public_url}})
 
-            # Uzupełnij dane w bazie Klientów (tylko jeśli puste)
+            # Uzupełnij NIP/PESEL w karcie klienta (tylko jeśli puste)
             page_after = notion.pages.retrieve(page_id=pid)
             props_after = page_after.get("properties", {})
             if page_nip:
                 set_page_text_prop_if_empty(notion, pid, props_after, PROP_NIP_MAIN, page_nip)
             if page_pesel:
                 set_page_text_prop_if_empty(notion, pid, props_after, PROP_PESEL_MAIN, page_pesel)
-            if company_data:
-                set_page_text_prop_if_empty(notion, pid, props_after, PROP_FIRMA_NAME, company_data.get("Nazwa_firmy",""))
-                set_page_text_prop_if_empty(notion, pid, props_after, PROP_REGON,       company_data.get("REGON",""))
-                set_page_text_prop_if_empty(notion, pid, props_after, PROP_CITY,        company_data.get("Miejscowość",""))
-                set_page_text_prop_if_empty(notion, pid, props_after, PROP_PKD,         company_data.get("PKD",""))
-                set_page_text_prop_if_empty(notion, pid, props_after, PROP_ADDRESS,     company_data.get("Adres",""))
 
             processed += 1
 
@@ -559,81 +464,3 @@ async def notion_poll():
         return JSONResponse({"ok": False, "where": "notion", "code": getattr(e, "code", None), "message": str(e)}, status_code=500)
     except Exception as e:
         return JSONResponse({"ok": False, "where": "server", "message": str(e)}, status_code=500)
-
-# ===== ENRICH (uzupełnianie po NIP – tylko baza Klientów) =====
-ENRICH_SECRET   = os.getenv("ENRICH_SECRET", "")
-
-def _first_empty(fields: list[str], props: Dict[str, Any]) -> bool:
-    for fn in fields:
-        p = props.get(fn, {})
-        t = p.get("type")
-        if t == "rich_text" and len(p.get("rich_text", [])) == 0: return True
-        if t == "title" and len(p.get("title", [])) == 0: return True
-        if t == "number" and p.get("number") is None: return True
-        if t == "select" and p.get("select") is None: return True
-        if t == "multi_select" and len(p.get("multi_select", [])) == 0: return True
-        if t == "url" and not p.get("url"): return True
-        if t == "date" and not p.get("date"): return True
-        if t is None:
-            return True
-    return False
-
-def _set_text(prop_name: str, value: str) -> Dict[str, Any]:
-    return {prop_name: {"rich_text": [{"type": "text", "text": {"content": value}}]}}
-
-@app.post("/notion/enrich")
-async def notion_enrich(x_enrich_key: str | None = Query(default=None)):
-    if ENRICH_SECRET and x_enrich_key != ENRICH_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    notion = get_notion()
-    resp = notion.databases.query(
-        database_id=NOTION_DB_ID,
-        filter={"property": PROP_NIP_MAIN, "rich_text": {"is_not_empty": True}},
-        page_size=50
-    )
-    results = resp.get("results", [])
-    updated = 0
-
-    for page in results:
-        pid = page["id"]
-        props = page.get("properties", {})
-        nip_prop = props.get(PROP_NIP_MAIN, {})
-        nip_text = ""
-        if nip_prop.get("type") == "rich_text":
-            nip_text = "".join([x.get("plain_text","") for x in nip_prop.get("rich_text", [])]).strip()
-        elif nip_prop.get("type") == "title":
-            nip_text = "".join([x.get("plain_text","") for x in nip_prop.get("title", [])]).strip()
-        elif nip_prop.get("type") == "number":
-            nip_text = str(nip_prop.get("number") or "")
-
-        if not nip_text:
-            continue
-
-        # Czy mamy braki do uzupełnienia?
-        if not _first_empty([PROP_FIRMA_NAME, PROP_REGON, PROP_CITY, PROP_PKD, PROP_ADDRESS], props):
-            continue
-
-        try:
-            data = await fetch_company_data_by_nip(nip_text)
-        except Exception as e:
-            print(f"[WARN] enrich nip {nip_text} failed: {e}")
-            continue
-
-        patch: Dict[str, Any] = {}
-        if props.get(PROP_FIRMA_NAME) and _first_empty([PROP_FIRMA_NAME], props) and data.get("Nazwa_firmy"):
-            patch.update(_set_text(PROP_FIRMA_NAME, data["Nazwa_firmy"]))
-        if props.get(PROP_REGON) and _first_empty([PROP_REGON], props) and data.get("REGON"):
-            patch.update(_set_text(PROP_REGON, data["REGON"]))
-        if props.get(PROP_CITY) and _first_empty([PROP_CITY], props) and data.get("Miejscowość"):
-            patch.update(_set_text(PROP_CITY, data["Miejscowość"]))
-        if props.get(PROP_PKD) and _first_empty([PROP_PKD], props) and data.get("PKD"):
-            patch.update(_set_text(PROP_PKD, data["PKD"]))
-        if props.get(PROP_ADDRESS) and _first_empty([PROP_ADDRESS], props) and data.get("Adres"):
-            patch.update(_set_text(PROP_ADDRESS, data["Adres"]))
-
-        if patch:
-            notion.pages.update(page_id=pid, properties=patch)
-            updated += 1
-
-    return {"ok": True, "updated": updated}
