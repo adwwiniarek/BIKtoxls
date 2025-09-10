@@ -1,165 +1,83 @@
-# parse_bik.py  — stabilny, z łączeniem wielowierszowych nazw
-import re
-import fitz  # PyMuPDF
-from typing import List, Dict, Any, Optional
+import fitz, re
 
-UPPER_RE = re.compile(r"^[^a-ząćęłńóśżź]+$")  # cała linia bez małych (CAPS)
-SPACES_RE = re.compile(r"\s+")
-NUM_RE = re.compile(r"[-+]?[0-9][0-9\s]*([.,][0-9]{1,2})?")
+RE_ACTIVE = re.compile(r"Zobowiązania\s+finansowe\s*-\s*w\s*trakcie\s*spłaty", re.I)
+RE_CLOSED = re.compile(r"Zobowiązania\s+finansowe\s*-\s*zamknięte", re.I)
+RE_INFO   = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.I)
+RE_TOTAL  = re.compile(r"^Łącznie\b", re.I)
+RE_DATE   = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
+RE_ANYD   = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+RE_FORBID = re.compile(r"(PLN|ND|BRAK|\d)")
 
-HEAD_IN_PROGRESS = "Zobowiązania finansowe - w trakcie spłaty"
-
-def _clean_line(s: str) -> str:
-    s = s.replace("\t", " ")
-    s = SPACES_RE.sub(" ", s)
-    return s.strip().strip('"').strip("'")
-
-def _num(s: Optional[str]) -> Optional[float]:
-    if not s: return None
-    s = s.replace(" ", "").replace("\u00A0","").replace("PLN","").strip()
-    if s.upper() == "ND": return None
-    if s.upper() == "BRAK": return 0.0
-    s = s.replace(",", ".")
-    try:
-        return float(s)
-    except:
-        m = NUM_RE.search(s)
-        if m:
-            try: return float(m.group(0).replace(" ", "").replace(",", "."))
-            except: return None
-        return None
-
-def _join_caps(lines: List[str], start_idx: int) -> (str, int):
-    """Sklej kilka kolejnych wierszy CAPS w jedną nazwę; zwróć (nazwa, last_idx)."""
-    parts = []
-    i = start_idx
-    while i < len(lines):
-        ln = _clean_line(lines[i])
-        if not ln or not UPPER_RE.match(ln): break
-        parts.append(ln)
-        # Jeśli linia wygląda na urwaną (np. kończy się pojedynczą literą), i kolejna też CAPS — doklej
-        i += 1
-    name = " ".join(parts)
-    return name, i-1
-
-def _join_product(lines: List[str], start_idx: int) -> (str, int):
-    """Sklej produkt z kolejnych wierszy nie-CAPS (do pierwszego CAPS/kolumny)."""
-    parts = []
-    i = start_idx
-    while i < len(lines):
-        ln = _clean_line(lines[i])
-        if not ln or UPPER_RE.match(ln): break
-        # pomijamy nagłówki tabeli
-        low = ln.lower()
-        if any(k in low for k in ["zawarcie", "pierwotna", "pozostało", "kwota raty", "suma zaległości", "historia", "ostatnia płatność", "łącznie", "zamknięte"]):
-            break
-        parts.append(ln)
-        i += 1
-    prod = " ".join(parts)
-    return prod.strip(), i-1
-
-def _extract_table_rows(text_lines: List[str]) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    in_section = False
-
-    i = 0
-    n = len(text_lines)
-    while i < n:
-        line = _clean_line(text_lines[i])
-
-        if not in_section:
-            if HEAD_IN_PROGRESS.lower() in line.lower():
-                in_section = True
-            i += 1
-            continue
-
-        if not line:
-            i += 1
-            continue
-
-        # wyjście z sekcji
-        low = line.lower()
-        if low.startswith("łącznie") or "zamknięte" in low:
-            break
-
-        # produkt (nie-CAPS) → może zajmować kilka wierszy
-        if not UPPER_RE.match(line):
-            product, i = _join_product(text_lines, i)
-            # po produkcie oczekujemy CAPS (wierzyciel)
-            i += 1
-            if i >= n: break
-            nxt = _clean_line(text_lines[i])
-            if not nxt or not UPPER_RE.match(nxt):
-                # jeśli jednak nie ma wierzyciela, przejdź dalej
-                continue
-            # wierzyciel wielowierszowy
-            creditor, i = _join_caps(text_lines, i)
-
-            # teraz poszukaj daty + liczb w kolejnych 1–4 liniach
-            z = {
-                "Rodzaj_produktu": product,
-                "Kredytodawca": creditor,
-                "Zawarcie_umowy": "",
-                "Pierwotna_kwota": None,
-                "Pozostało_do_spłaty": None,
-                "Kwota_raty": None,
-                "Suma_zaległości": None,
-            }
-            for j in range(1, 5):
-                if i + j >= n: break
-                nxt2 = _clean_line(text_lines[i + j])
-                if not nxt2: continue
-                mdate = re.search(r"\b\d{2}\.\d{2}\.\d{4}\b", nxt2)
-                if mdate and not z["Zawarcie_umowy"]:
-                    z["Zawarcie_umowy"] = mdate.group(0)
-                nums = [m.group(0) for m in NUM_RE.finditer(nxt2)]
-                if nums:
-                    if z["Pierwotna_kwota"] is None and len(nums) >= 1:
-                        z["Pierwotna_kwota"] = _num(nums[0])
-                    if z["Pozostało_do_spłaty"] is None and len(nums) >= 2:
-                        z["Pozostało_do_spłaty"] = _num(nums[1])
-                    if z["Kwota_raty"] is None and len(nums) >= 3:
-                        z["Kwota_raty"] = _num(nums[2])
-                    if z["Suma_zaległości"] is None and len(nums) >= 4:
-                        z["Suma_zaległości"] = _num(nums[3])
-
-            if z["Kwota_raty"] is None:
-                z["Kwota_raty"] = None
-            if z["Suma_zaległości"] is None:
-                z["Suma_zaległości"] = 0.0
-
-            rows.append(z)
-            # przeskocz kilka linii z liczbami
-            i += 4
-            continue
-
-        # jeśli trafimy CAPS bez produktu (rzadkie w tej sekcji) – zignoruj
-        i += 1
-
-    return rows
-
-def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]]:
+def _read_lines(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    lines: List[str] = []
+    lines = []
     for p in doc:
-        t = p.get_text("text") or ""
-        if t: lines.extend(t.splitlines())
-    doc.close()
+        lines += [l.strip() for l in p.get_text("text").splitlines() if l.strip()]
+    return lines
 
-    rows = _extract_table_rows(lines)
+def _slice_active(lines):
+    s = next((i for i,l in enumerate(lines) if RE_ACTIVE.search(l)), None)
+    if s is None: return []
+    e = len(lines)
+    for j in range(s+1, len(lines)):
+        if RE_CLOSED.search(lines[j]) or RE_INFO.search(lines[j]) or RE_ACTIVE.search(lines[j]):
+            e = j; break
+    for k in range(s+1, e):
+        if RE_TOTAL.search(lines[k]): e = k; break
+    return lines[s:e]
 
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        out.append({
-            "Źródło": source,
-            "Rodzaj_produktu": r.get("Rodzaj_produktu",""),
-            "Kredytodawca": r.get("Kredytodawca",""),
-            "Zawarcie_umowy": r.get("Zawarcie_umowy",""),
-            "Pierwotna_kwota": r.get("Pierwotna_kwota"),
-            "Pozostało_do_spłaty": r.get("Pozostało_do_spłaty"),
-            "Kwota_raty": r.get("Kwota_raty"),
-            "Suma_zaległości": r.get("Suma_zaległości", 0.0),
-            "NIP": "",
-            "Adres": "",
-        })
-    return out
+def _is_upper(line: str) -> bool:
+    if RE_FORBID.search(line) or RE_ANYD.search(line): return False
+    letters = re.sub(r"[^A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]", "", line)
+    return bool(letters) and line == line.upper()
+
+def _lender_block(lines, idx, max_up=8):
+    parts, j = [], idx-1
+    while j >= 0 and len(parts) < max_up and _is_upper(lines[j]):
+        parts.insert(0, lines[j]); j -= 1
+    return " ".join(parts).strip(), j
+
+def _product_line(lines, j_above):
+    return lines[j_above].strip() if j_above >= 0 else ""
+
+def _parse_tok(tok, pos):
+    up = tok.upper().strip()
+    if up == "ND":   return None
+    if up == "BRAK": return 0.0 if pos == 3 else None
+    t = up.replace("PLN","").replace("\u00a0"," ").replace(" ","")
+    t = t.replace(".","").replace(",",".")
+    try: return float(t)
+    except: return None
+
+def _collect4(lines, start_idx, window=6):
+    import re as _re
+    chunk = " ".join(lines[start_idx:start_idx+window])
+    toks = _re.findall(r"\d{1,3}(?:[\.\s]\d{3})*(?:,\d+)?\s*PLN|ND|BRAK", chunk, _re.I)
+    toks = toks[:4] + [None]*(4-len(toks))
+    return [_parse_tok(t, i) if t else None for i,t in enumerate(toks)]
+
+def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
+    lines = _slice_active(_read_lines(pdf_bytes))
+    rows = []
+    for i,l in enumerate(lines):
+        if RE_DATE.search(l):
+            data = l.split()[0]
+            lender, j = _lender_block(lines, i)
+            product = _product_line(lines, j)
+            k1,k2,k3,k4 = _collect4(lines, i, window=6)
+
+            import re as _re
+            lender  = _re.sub(r"\s+", " ", lender).strip()
+            product = _re.sub(r"\s+", " ", product).strip()
+
+            rows.append({
+                "Źródło": source,
+                "Rodzaj_produktu": product,
+                "Kredytodawca": lender,
+                "Zawarcie_umowy": data,
+                "Pierwotna_kwota": k1,
+                "Pozostało_do_spłaty": k2,
+                "Kwota_raty": k3,
+                "Suma_zaległości": k4,
+            })
+    return rows
