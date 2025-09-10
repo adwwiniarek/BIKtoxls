@@ -1,3 +1,5 @@
+# server.py (pełna treść)
+
 import os, io, re, time, hmac, base64
 from typing import List, Dict, Any, Optional
 
@@ -13,11 +15,9 @@ from parse_bik import parse_bik_pdf
 from notion_client import Client as Notion
 from notion_client.errors import APIResponseError
 
-# =========================
-# KONFIG
-# =========================
 app = FastAPI(title="BIK PDF -> XLS (Notion bridge + expiring links)")
 
+# --- ENV / KONFIG ---
 FILES_DIR = os.getenv("FILES_DIR", "files")
 os.makedirs(FILES_DIR, exist_ok=True)
 app.mount("/files", StaticFiles(directory=FILES_DIR), name="files")
@@ -33,27 +33,26 @@ if not DL_SECRET:
 
 NOTION_TOKEN   = os.getenv("NOTION_TOKEN", "")
 NOTION_DB_ID   = os.getenv("NOTION_DB_ID", "")
-PROP_PDF       = os.getenv("PROP_PDF", "PDF")
-PROP_XLS       = os.getenv("PROP_XLS", "XLS")
-PROP_STATUS    = os.getenv("PROP_STATUS", "Status")
-STATUS_NEW     = os.getenv("STATUS_NEW", "Nowy")
-STATUS_DONE    = os.getenv("STATUS_DONE", "Przetworzony")
 
-# Nazwy kolumn w bazie Klientów, które uzupełniamy:
-PROP_NIP_MAIN   = os.getenv("PROP_NIP_MAIN", "NIP")
-PROP_PESEL_MAIN = os.getenv("PROP_PESEL_MAIN", "PESEL")
+# Nazwy kolumn w głównej bazie Klientów
+PROP_PDF         = os.getenv("PROP_PDF", "PDF")   # Files & media
+PROP_XLS         = os.getenv("PROP_XLS", "XLS")   # URL
+PROP_NIP_MAIN    = os.getenv("PROP_NIP_MAIN", "NIP")
+PROP_PESEL_MAIN  = os.getenv("PROP_PESEL_MAIN", "PESEL")
 
-# =========================
-# POMOCNICZE: XLS
-# =========================
+# Kolumny w pomocniczej bazie „lista wierzycieli”
+CRED_COLS = [
+    "Kredytodawca","Źródło","Rodzaj_produktu","Zawarcie_umowy",
+    "Pierwotna_kwota","Pozostało_do_spłaty","Kwota_raty","Suma_zaległości","NIP"
+]
+
+# --- XLS helpers ---
 def rows_to_xlsx_bytes(rows: List[Dict[str, Any]]) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "BIK_Raport"
-    headers = [
-        "Źródło","Rodzaj_produktu","Kredytodawca","Zawarcie_umowy",
-        "Pierwotna_kwota","Pozostało_do_spłaty","Kwota_raty","Suma_zaległości","NIP"
-    ]
+    headers = ["Źródło","Rodzaj_produktu","Kredytodawca","Zawarcie_umowy",
+               "Pierwotna_kwota","Pozostało_do_spłaty","Kwota_raty","Suma_zaległości","NIP"]
     ws.append(headers)
     for r in rows:
         ws.append([r.get(h, "") for h in headers])
@@ -105,9 +104,12 @@ async def http_get_bytes(url: str) -> bytes:
         r.raise_for_status()
         return r.content
 
-# =========================
-# POMOCNICZE: Notion
-# =========================
+# --- Notion helpers ---
+def get_notion() -> Notion:
+    if not NOTION_TOKEN:
+        raise RuntimeError("Brak NOTION_TOKEN")
+    return Notion(auth=NOTION_TOKEN)
+
 def get_page_title_from_properties(props: Dict[str, Any]) -> str:
     for _, val in props.items():
         if isinstance(val, dict) and val.get("type") == "title":
@@ -128,24 +130,60 @@ def extract_file_urls_from_notion_file_prop(file_prop: Dict[str, Any]):
         if u: urls.append(u)
     return urls
 
-def get_notion() -> Notion:
-    if not NOTION_TOKEN:
-        raise RuntimeError("Brak NOTION_TOKEN")
-    return Notion(auth=NOTION_TOKEN)
-
 def _num_or_none(v):
     try:
         return float(v) if v not in ("", None) else None
     except:
         return None
 
-# =========================
-# NIP / PESEL: ekstrakcja i walidacja
-# =========================
+def is_empty_prop(prop: Dict[str, Any]) -> bool:
+    t = prop.get("type")
+    if t == "rich_text":
+        return len(prop.get("rich_text", [])) == 0
+    if t == "title":
+        return len(prop.get("title", [])) == 0
+    if t == "number":
+        return prop.get("number") is None
+    if t == "url":
+        return not prop.get("url")
+    if t == "select":
+        return prop.get("select") is None
+    if t == "multi_select":
+        return len(prop.get("multi_select", [])) == 0
+    if t == "date":
+        return not prop.get("date")
+    return False
+
+def set_page_text_prop_if_empty(notion: Notion, page_id: str, props: Dict[str, Any], field_name: str, value: Optional[str]):
+    if not value:
+        return
+    prop = props.get(field_name)
+    if not isinstance(prop, dict):
+        return
+    if not is_empty_prop(prop):
+        return
+    t = prop.get("type")
+    if t == "rich_text":
+        notion.pages.update(page_id=page_id, properties={
+            field_name: {"rich_text":[{"type":"text","text":{"content": value}}]}
+        })
+    elif t == "title":
+        notion.pages.update(page_id=page_id, properties={
+            field_name: {"title":[{"type":"text","text":{"content": value}}]}
+        })
+    elif t == "number":
+        if value.isdigit():
+            notion.pages.update(page_id=page_id, properties={ field_name: {"number": float(value)} })
+    else:
+        notion.pages.update(page_id=page_id, properties={
+            field_name: {"rich_text":[{"type":"text","text":{"content": value}}]}
+        })
+
+# --- Identyfikacja źródła + NIP/PESEL z PDF ---
 NIP_CLEAN_RE   = re.compile(r"[^0-9]")
 NIP_FIND_RE    = re.compile(r"\bNIP[:\s]*([0-9]{10}|[0-9]{3}[-\s]?[0-9]{3}[-\s]?[0-9]{2}[-\s]?[0-9]{2})\b")
 PESEL_FIND_RE1 = re.compile(r"\bPESEL[:\s]*([0-9]{11})\b")
-PESEL_FIND_RE2 = re.compile(r"\b([0-9]{11})\b")  # fallback, gdy brak etykiety
+PESEL_FIND_RE2 = re.compile(r"\b([0-9]{11})\b")  # fallback
 
 def nip_normalize(nip_s: str) -> str:
     return NIP_CLEAN_RE.sub("", nip_s or "")
@@ -177,37 +215,26 @@ def pdf_first_page_text(pdf_bytes: bytes) -> str:
     return text
 
 def detect_source_and_ids(pdf_bytes: bytes) -> Dict[str, Optional[str]]:
-    """
-    Zwraca dict:
-      {"source": "firmowy"/"prywatny", "nip": <str|None>, "pesel": <str|None>}
-    """
     text = pdf_first_page_text(pdf_bytes)
     src = "firmowy" if "Wskaźnik BIK Moja Firma" in text else "prywatny"
 
     found_nip = None
     found_pesel = None
-
-    # Szukamy NIP tylko jeśli wygląda na firmowy (ale i tak sprawdzamy – czasem nagłówki się mylą)
     m = NIP_FIND_RE.search(text)
     if m:
         cand = nip_normalize(m.group(1))
         if nip_valid(cand):
             found_nip = cand
 
-    # PESEL – najpierw etykietowany, potem fallback
     m = PESEL_FIND_RE1.search(text)
     if not m:
         m = PESEL_FIND_RE2.search(text)
-    if m:
-        cand = m.group(1)
-        if pesel_valid(cand):
-            found_pesel = cand
+    if m and pesel_valid(m.group(1)):
+        found_pesel = m.group(1)
 
     return {"source": src, "nip": found_nip, "pesel": found_pesel}
 
-# =========================
-# Baza „lista wierzycieli” (Notion)
-# =========================
+# --- Baza „lista wierzycieli” (bez dodawania link_to_page) ---
 def create_creditors_database(notion: Notion, parent_page_id: str, db_name: str) -> str:
     db = notion.databases.create(
         parent={"type": "page_id", "page_id": parent_page_id},
@@ -247,54 +274,7 @@ def insert_creditor_rows(notion: Notion, db_id: str, rows: List[Dict[str, Any]])
             }
         )
 
-# =========================
-# Ustawianie właściwości NIP/PESEL na stronie klienta tylko jeśli puste
-# =========================
-def is_empty_prop(prop: Dict[str, Any]) -> bool:
-    t = prop.get("type")
-    if t == "rich_text":
-        return len(prop.get("rich_text", [])) == 0
-    if t == "title":
-        return len(prop.get("title", [])) == 0
-    if t == "number":
-        return prop.get("number") is None
-    if t == "url":
-        return not prop.get("url")
-    if t == "select":
-        return prop.get("select") is None
-    if t == "multi_select":
-        return len(prop.get("multi_select", [])) == 0
-    return False  # inne typy traktujemy jako niepuste/nieobsługiwane
-
-def set_page_text_prop_if_empty(notion: Notion, page_id: str, props: Dict[str, Any], field_name: str, value: Optional[str]):
-    if not value:
-        return
-    prop = props.get(field_name)
-    if not isinstance(prop, dict):
-        return
-    if not is_empty_prop(prop):
-        return
-    t = prop.get("type")
-    if t == "rich_text":
-        notion.pages.update(page_id=page_id, properties={
-            field_name: {"rich_text":[{"type":"text","text":{"content": value}}]}
-        })
-    elif t == "title":
-        notion.pages.update(page_id=page_id, properties={
-            field_name: {"title":[{"type":"text","text":{"content": value}}]}
-        })
-    elif t == "number":
-        if value.isdigit():
-            notion.pages.update(page_id=page_id, properties={ field_name: {"number": float(value)} })
-    else:
-        # inny typ – spróbujemy jako rich_text
-        notion.pages.update(page_id=page_id, properties={
-            field_name: {"rich_text":[{"type":"text","text":{"content": value}}]}
-        })
-
-# =========================
-# ROUTES
-# =========================
+# --- ROUTES ---
 @app.get("/")
 def root():
     return {"ok": True, "service": "BIK PDF -> XLS", "expiring_days": LINK_TTL_DAYS}
@@ -305,7 +285,7 @@ def poll_ui():
     <!DOCTYPE html>
     <html lang="pl"><head><meta charset="utf-8"><title>Notion Poll</title></head>
     <body style="font-family:system-ui;max-width:700px;margin:40px auto">
-      <h1>Generuj XLS z raportów BIK (pdf). Wywołaj POST /notion/poll</h1>
+      <h1>10 09 2025 9:06 Generuj XLS na podstawie raportów BIK (pdf). Wywołaj POST /notion/poll</h1>
       <button id="btn" style="padding:10px 16px;font-size:16px">Uruchom</button>
       <pre id="out" style="background:#f5f5f5;padding:12px;white-space:pre-wrap"></pre>
       <script>
@@ -372,16 +352,16 @@ def notion_db_check():
 async def notion_poll():
     try:
         notion = get_notion()
+        # Tylko: PDF is_not_empty + XLS is_empty (bez Status)
         pages = notion.databases.query(
-            **{"database_id": NOTION_DB_ID, "filter": {
+            database_id=NOTION_DB_ID,
+            filter={
                 "and": [
                     {"property": PROP_PDF, "files": {"is_not_empty": True}},
-                    {"or": [
-                        {"property": PROP_STATUS, "select": {"equals": STATUS_NEW}},
-                        {"property": PROP_XLS, "url": {"is_empty": True}},
-                    ]}
+                    {"property": PROP_XLS, "url": {"is_empty": True}},
                 ]
-            }, "page_size": 20}
+            },
+            page_size=20
         )["results"]
 
         processed = 0
@@ -406,20 +386,15 @@ async def notion_poll():
                     nip   = info["nip"]
                     pesel = info["pesel"]
 
-                    # dopisujemy NIP do wierszy (tylko dla firmowych), aby trafił też do XLS i bazy wierzycieli
                     parsed = parse_bik_pdf(pdf_bytes, source=src)
                     if nip and src == "firmowy":
                         for r in parsed:
                             r["NIP"] = nip
-                        # zapamiętaj dla strony klienta
                         page_nip = page_nip or nip
-
-                    # zapamiętaj PESEL (tylko z prywatnego)
                     if pesel and src == "prywatny":
                         page_pesel = page_pesel or pesel
 
                     all_rows.extend(parsed)
-
                 except Exception as e:
                     print(f"[WARN] Pobieranie/parsowanie nie powiodło się dla {url}: {e}")
 
@@ -432,22 +407,18 @@ async def notion_poll():
             save_file(xlsx_bytes, filename)
             public_url = expiring_download_url(filename)
 
-            # Baza „lista wierzycieli”
+            # Baza „lista wierzycieli” – tylko CREATE + wypełnienie (bez link_to_page)
             db_name = f"{title} lista wierzycieli"
             try:
                 db_id = create_creditors_database(notion, parent_page_id=pid, db_name=db_name)
                 insert_creditor_rows(notion, db_id, all_rows)
             except Exception as e:
-                print(f"[WARN] Nie udało się utworzyć bazy wierzycieli dla {title}: {e}")
+                print(f"[WARN] Nie udało się utworzyć/wypełnić bazy wierzycieli dla {title}: {e}")
 
-            # Zaktualizuj link i (opcjonalnie) status
-            update_props: Dict[str, Any] = {PROP_XLS: {"url": public_url}}
-            if PROP_STATUS in props:
-                update_props[PROP_STATUS] = {"select": {"name": STATUS_DONE}}
-            notion.pages.update(page_id=pid, properties=update_props)
+            # Link do XLS
+            notion.pages.update(page_id=pid, properties={PROP_XLS: {"url": public_url}})
 
-            # UZUPEŁNIJ NIP/PESEL NA STRONIE KLIENTA (tylko jeśli puste)
-            # odśwież właściwości strony po update (bezpiecznie)
+            # Uzupełnij NIP/PESEL w bazie głównej – tylko jeśli puste
             page_after = notion.pages.retrieve(page_id=pid)
             props_after = page_after.get("properties", {})
             if PROP_NIP_MAIN in props_after and page_nip:
