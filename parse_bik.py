@@ -1,3 +1,5 @@
+# parse_bik.py (pełna treść)
+
 import fitz, re
 
 RE_ACTIVE = re.compile(r"Zobowiązania\s+finansowe\s*-\s*w\s*trakcie\s*spłaty", re.I)
@@ -7,6 +9,8 @@ RE_TOTAL  = re.compile(r"^Łącznie\b", re.I)
 RE_DATE   = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
 RE_ANYD   = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 RE_FORBID = re.compile(r"(PLN|ND|BRAK|\d)")
+
+AMOUNT_RE = re.compile(r"(ND|BRAK|(?:\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?\s*PLN))", re.I)
 
 def _read_lines(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -27,7 +31,8 @@ def _slice_active(lines):
     return lines[s:e]
 
 def _is_upper(line: str) -> bool:
-    if RE_FORBID.search(line) or RE_ANYD.search(line): return False
+    if RE_FORBID.search(line) or RE_ANYD.search(line): 
+        return False
     letters = re.sub(r"[^A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]", "", line)
     return bool(letters) and line == line.upper()
 
@@ -35,26 +40,30 @@ def _lender_block(lines, idx, max_up=8):
     parts, j = [], idx-1
     while j >= 0 and len(parts) < max_up and _is_upper(lines[j]):
         parts.insert(0, lines[j]); j -= 1
-    return " ".join(parts).strip(), j
+    lender = " ".join(parts).strip()
+    return re.sub(r"\s+", " ", lender), j  # j wskazuje na linię nad blokiem
 
-def _product_line(lines, j_above):
-    return lines[j_above].strip() if j_above >= 0 else ""
+def _product_above(lines, j_above):
+    if j_above >= 0:
+        prod = lines[j_above].strip()
+        if not _is_upper(prod):  # produkt nie jest wersalikami
+            return re.sub(r"\s+", " ", prod)
+    return ""
 
-def _parse_tok(tok, pos):
+def _parse_amount(tok: str, pos: int):
     up = tok.upper().strip()
     if up == "ND":   return None
-    if up == "BRAK": return 0.0 if pos == 3 else None
+    if up == "BRAK": return 0.0 if pos == 3 else None  # BRAK tylko dla „Suma zaległości”
     t = up.replace("PLN","").replace("\u00a0"," ").replace(" ","")
     t = t.replace(".","").replace(",",".")
     try: return float(t)
     except: return None
 
-def _collect4(lines, start_idx, window=6):
-    import re as _re
-    chunk = " ".join(lines[start_idx:start_idx+window])
-    toks = _re.findall(r"\d{1,3}(?:[\.\s]\d{3})*(?:,\d+)?\s*PLN|ND|BRAK", chunk, _re.I)
+def _collect_from_same_line(line: str):
+    # Dokładnie 4 tokeny na tej linii: Pierwotna, Pozostało, Rata, Zaległości
+    toks = AMOUNT_RE.findall(line)
     toks = toks[:4] + [None]*(4-len(toks))
-    return [_parse_tok(t, i) if t else None for i,t in enumerate(toks)]
+    return [_parse_amount(t, i) if t else None for i,t in enumerate(toks)]
 
 def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
     lines = _slice_active(_read_lines(pdf_bytes))
@@ -63,12 +72,8 @@ def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
         if RE_DATE.search(l):
             data = l.split()[0]
             lender, j = _lender_block(lines, i)
-            product = _product_line(lines, j)
-            k1,k2,k3,k4 = _collect4(lines, i, window=6)
-
-            import re as _re
-            lender  = _re.sub(r"\s+", " ", lender).strip()
-            product = _re.sub(r"\s+", " ", product).strip()
+            product   = _product_above(lines, j)
+            k1,k2,k3,k4 = _collect_from_same_line(l)
 
             rows.append({
                 "Źródło": source,
