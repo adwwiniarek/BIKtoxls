@@ -6,7 +6,15 @@ RE_INFO   = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.
 RE_TOTAL  = re.compile(r"^Łącznie\b", re.I)
 RE_DATE   = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
 RE_ANYD   = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+
+# cokolwiek zawiera PLN/ND/BRAK lub cyfry – to nie jest czysta etykieta
 RE_FORBID = re.compile(r"(PLN|ND|BRAK|\d)")
+
+# słowa-klucze produktu (również gdy są WIELKIMI LITERAMI)
+RE_PRODUCT_HINT = re.compile(
+    r"\b(kredyt|pożyczka|gotówkowy|konsolidacyjny|hipoteczny|obrotowy|"
+    r"rachunku|limit|debetowy|karta|leasing|faktoring|linia)\b", re.I
+)
 
 def _read_lines(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -26,19 +34,50 @@ def _slice_active(lines):
         if RE_TOTAL.search(lines[k]): e = k; break
     return lines[s:e]
 
-def _is_upper(line: str) -> bool:
+def _is_all_caps_lender_line(line: str) -> bool:
+    # wielkie litery, bez kwot/dat, i NIE wygląda jak nazwa produktu
     if RE_FORBID.search(line) or RE_ANYD.search(line): return False
+    if RE_PRODUCT_HINT.search(line): return False
     letters = re.sub(r"[^A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]", "", line)
     return bool(letters) and line == line.upper()
 
-def _lender_block(lines, idx, max_up=8):
-    parts, j = [], idx-1
-    while j >= 0 and len(parts) < max_up and _is_upper(lines[j]):
-        parts.insert(0, lines[j]); j -= 1
-    return " ".join(parts).strip(), j
+def _find_product_and_lender(lines, date_idx, max_back=8):
+    """
+    Szukamy w górę od wiersza z datą:
+      - najpierw wiersza z produktem (po słowach-kluczach),
+      - potem zbieramy ciąg WIELKICH liter pomiędzy produktem a datą jako wierzyciela.
+    Jeśli nie znajdziemy produktu, fallback do najbliższego „caps bloku” powyżej.
+    """
+    product = ""
+    lender_lines = []
+    # 1) produkt
+    j = date_idx - 1
+    while j >= 0 and date_idx - j <= max_back:
+        ln = lines[j]
+        if not RE_FORBID.search(ln) and RE_PRODUCT_HINT.search(ln):
+            product = ln.strip()
+            # 2) wierzyciel – ciąg caps między produktem a datą
+            k = j + 1
+            while k < date_idx and _is_all_caps_lender_line(lines[k]):
+                lender_lines.append(lines[k].strip())
+                k += 1
+            break
+        j -= 1
 
-def _product_line(lines, j_above):
-    return lines[j_above].strip() if j_above >= 0 else ""
+    # fallback – gdy produkt nie trafiony, spróbuj „starym” sposobem
+    if not product:
+        # caps-blok tuż nad datą to wierzyciel
+        k = date_idx - 1
+        while k >= 0 and _is_all_caps_lender_line(lines[k]):
+            lender_lines.insert(0, lines[k].strip())
+            k -= 1
+        # produkt: pierwszy sensowny wiersz nad caps-blokiem z hintem
+        if k >= 0 and RE_PRODUCT_HINT.search(lines[k]):
+            product = lines[k].strip()
+
+    lender = re.sub(r"\s+", " ", " ".join(lender_lines)).strip()
+    product = re.sub(r"\s+", " ", product).strip()
+    return product, lender
 
 def _parse_tok(tok, pos):
     up = tok.upper().strip()
@@ -49,9 +88,15 @@ def _parse_tok(tok, pos):
     try: return float(t)
     except: return None
 
-def _collect4(lines, start_idx, window=6):
+def _collect4_from_date_line(lines, idx):
+    """
+    Kwoty bierzemy z wiersza z datą + ewentualnie następny wiersz,
+    gdy PDF „zawinął” fragment.
+    """
     import re as _re
-    chunk = " ".join(lines[start_idx:start_idx+window])
+    chunk = lines[idx]
+    if idx + 1 < len(lines) and not RE_DATE.search(lines[idx+1]):
+        chunk += " " + lines[idx+1]
     toks = _re.findall(r"\d{1,3}(?:[\.\s]\d{3})*(?:,\d+)?\s*PLN|ND|BRAK", chunk, _re.I)
     toks = toks[:4] + [None]*(4-len(toks))
     return [_parse_tok(t, i) if t else None for i,t in enumerate(toks)]
@@ -62,13 +107,8 @@ def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
     for i,l in enumerate(lines):
         if RE_DATE.search(l):
             data = l.split()[0]
-            lender, j = _lender_block(lines, i)
-            product = _product_line(lines, j)
-            k1,k2,k3,k4 = _collect4(lines, i, window=6)
-
-            import re as _re
-            lender  = _re.sub(r"\s+", " ", lender).strip()
-            product = _re.sub(r"\s+", " ", product).strip()
+            product, lender = _find_product_and_lender(lines, i)
+            k1,k2,k3,k4 = _collect4_from_date_line(lines, i)
 
             rows.append({
                 "Źródło": source,
