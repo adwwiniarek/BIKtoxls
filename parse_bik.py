@@ -1,7 +1,21 @@
-# parse_bik.py (pełna treść)
-
+# parse_bik.py (fixed)
 import fitz, re
 
+# --- Normalizacja tekstu (spacje niełamliwe, wąskie spacje, separatory tysięcy) ---
+
+NBSP_CHARS = "\u00A0\u202F\u2009"  # NBSP, narrow no-break, thin space
+
+def _normalize_text(s: str) -> str:
+    # 1) Zamień różne spacje na zwykłą
+    if any(c in s for c in NBSP_CHARS):
+        s = re.sub(f"[{NBSP_CHARS}]", " ", s)
+    # 2) Usuń separatory tysięcy (kropka/spacja) TYLKO między cyframi (np. 25.298 -> 25298, 2 045 -> 2045)
+    s = re.sub(r"(?<=\d)[ .](?=\d{3}\b)", "", s)
+    # 3) Standaryzuj wielokrotne spacje
+    s = re.sub(r"[ \t]+", " ", s).strip()
+    return s
+
+# --- Sekcje / kotwice jak u Ciebie ---
 RE_ACTIVE = re.compile(r"Zobowiązania\s+finansowe\s*-\s*w\s*trakcie\s*spłaty", re.I)
 RE_CLOSED = re.compile(r"Zobowiązania\s+finansowe\s*-\s*zamknięte", re.I)
 RE_INFO   = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.I)
@@ -10,13 +24,22 @@ RE_DATE   = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
 RE_ANYD   = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 RE_FORBID = re.compile(r"(PLN|ND|BRAK|\d)")
 
-AMOUNT_RE = re.compile(r"(ND|BRAK|(?:\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?\s*PLN))", re.I)
+# Kwota: ND | BRAK | liczba (z opcjonalnymi tysiącami i groszami) + opcjonalne "PLN"
+AMOUNT_RE = re.compile(
+    r"(ND|BRAK|(?:\d{1,3}(?:[ .]\d{3})+|\d+)(?:[.,]\d+)?)(?:\s*PLN)?",
+    re.I
+)
 
 def _read_lines(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     lines = []
     for p in doc:
-        lines += [l.strip() for l in p.get_text("text").splitlines() if l.strip()]
+        raw = p.get_text("text").splitlines()
+        for l in raw:
+            l = l.strip()
+            if not l:
+                continue
+            lines.append(_normalize_text(l))
     return lines
 
 def _slice_active(lines):
@@ -31,7 +54,7 @@ def _slice_active(lines):
     return lines[s:e]
 
 def _is_upper(line: str) -> bool:
-    if RE_FORBID.search(line) or RE_ANYD.search(line): 
+    if RE_FORBID.search(line) or RE_ANYD.search(line):
         return False
     letters = re.sub(r"[^A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]", "", line)
     return bool(letters) and line == line.upper()
@@ -54,14 +77,27 @@ def _parse_amount(tok: str, pos: int):
     up = tok.upper().strip()
     if up == "ND":   return None
     if up == "BRAK": return 0.0 if pos == 3 else None  # BRAK tylko dla „Suma zaległości”
-    t = up.replace("PLN","").replace("\u00a0"," ").replace(" ","")
-    t = t.replace(".","").replace(",",".")
-    try: return float(t)
-    except: return None
+    # liczby: po _normalize_text separatory tysięcy usunięte, więc wystarczy zamiana przecinka
+    t = up.replace("PLN", "").strip()
+    t = t.replace(",", ".")
+    # dopuszczamy "0", "0.00" itd.
+    try:
+        return float(t)
+    except:
+        return None
 
 def _collect_from_same_line(line: str):
-    # Dokładnie 4 tokeny na tej linii: Pierwotna, Pozostało, Rata, Zaległości
-    toks = AMOUNT_RE.findall(line)
+    """
+    Wiersz tabeli ma postać:
+    DD.MM.RRRR <k1> <k2> <k3> <k4>
+    gdzie każda kolumna może być: liczba (z/bez PLN), 0, ND, BRAK.
+    """
+    # odetnij datę (pierwszy token)
+    m = RE_DATE.match(line)
+    rest = line[m.end():].strip() if m else line
+
+    toks = [m.group(1) for m in AMOUNT_RE.finditer(rest)]
+    # bierzemy dokładnie 4 (pierwotna, pozostało, rata, zaległości)
     toks = toks[:4] + [None]*(4-len(toks))
     return [_parse_amount(t, i) if t else None for i,t in enumerate(toks)]
 
@@ -71,8 +107,8 @@ def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
     for i,l in enumerate(lines):
         if RE_DATE.search(l):
             data = l.split()[0]
-            lender, j = _lender_block(lines, i)
-            product   = _product_above(lines, j)
+            lender, j  = _lender_block(lines, i)
+            product    = _product_above(lines, j)
             k1,k2,k3,k4 = _collect_from_same_line(l)
 
             rows.append({
