@@ -54,9 +54,8 @@ def _slice_active_section(lines: List[str]) -> List[str]:
             end_index = j
             break
             
-    # Nowa, poprawna lista linii zaczyna się od reszty linii z nagłówkiem
     active_lines = [first_line_of_data] + lines[start_index + 1 : end_index]
-    return [line for line in active_lines if line] # Usuń puste linie
+    return [line for line in active_lines if line]
 
 def _parse_amount(tok: Optional[str]) -> Optional[float]:
     if tok is None: return None
@@ -115,7 +114,8 @@ def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]
         if all_text_lines:
             all_text_lines = [line for line in all_text_lines if line]
             if all_text_lines:
-                product = all_text_lines.pop(-1)
+                product = all_text_lines.pop(-pobranie kwoty, pozostałej do spłaty, raty, zaległości
+1)
                 lender = " ".join(all_text_lines)
 
         parsed_amounts = [_parse_amount(tok) for tok in all_amount_tokens]
