@@ -1,85 +1,53 @@
-# server.py (wersja finalna, dostosowana do linku z Notion)
-
+# server.py (wersja diagnostyczna)
 from fastapi import FastAPI, Request, HTTPException, Query
 from notion_client import Client
 import httpx
-import pandas as pd
-from io import BytesIO
 import os
 
-# Importujemy naszą finalną, poprawną funkcję z drugiego pliku
-from parse_bik import parse_bik_pdf
+# Importujemy nową funkcję diagnostyczną
+from parse_bik import diagnose_pdf_text
 
 # --- KONFIGURACJA ---
-# Upewnij się, że nazwy poniżej DOKŁADNIE odpowiadają nazwom kolumn w Twojej bazie Notion.
 NOTION_PDF_PROPERTY_NAME = "Raporty BIK"
-NOTION_XLS_PROPERTY_NAME = "BIK Raport"
-NOTION_SOURCE_PROPERTY_NAME = "Źródło"
 # --------------------
 
 app = FastAPI()
-
-# Inicjalizacja klienta Notion
 notion_token = os.environ.get("NOTION_TOKEN")
 notion = Client(auth=notion_token)
 
-def create_excel_file(data):
-    """Tworzy plik Excel w pamięci na podstawie przetworzonych danych."""
-    output = BytesIO()
-    df = pd.DataFrame(data)
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='BIK_Raport')
-    output.seek(0)
-    return output
-
-# Zmieniony endpoint, aby pasował do Twojego linku z Notion
 @app.get('/notion/poll-one')
-async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str = Query(..., alias="x_key")):
-    # FastAPI automatycznie pobierze page_id i x_key z linku URL
+async def notion_poll_one_diagnostic(page_id: str = Query(..., alias="page_id"), x_key: str = Query(..., alias="x_key")):
     try:
         if not page_id:
             raise HTTPException(status_code=400, detail="Brak page_id w adresie URL.")
 
-        print(f"Otrzymano żądanie dla strony: {page_id}")
+        print(f"DIAGNOSTYKA: Otrzymano żądanie dla strony: {page_id}")
         page_data = notion.pages.retrieve(page_id=page_id)
         props = page_data.get('properties', {})
         
         pdf_property = props.get(NOTION_PDF_PROPERTY_NAME, {})
-        xls_property = props.get(NOTION_XLS_PROPERTY_NAME, {})
-
         pdf_files = pdf_property.get('files', [])
-        xls_files = xls_property.get('files', [])
 
         if not pdf_files:
-            print(f"Brak akcji: Nie znaleziono plików PDF w kolumnie '{NOTION_PDF_PROPERTY_NAME}'.")
-            return {"message": f"ℹ️ Brak akcji (brak PDF w kolumnie '{NOTION_PDF_PROPERTY_NAME}')"}
-        
-        if xls_files:
-            print(f"Brak akcji: Plik wynikowy XLS już istnieje w kolumnie '{NOTION_XLS_PROPERTY_NAME}'.")
-            return {"message": f"ℹ️ Brak akcji (plik XLS już istnieje w '{NOTION_XLS_PROPERTY_NAME}')"}
+            raise HTTPException(status_code=400, detail=f"DIAGNOZA: Nie znaleziono plików PDF w kolumnie '{NOTION_PDF_PROPERTY_NAME}'.")
         
         pdf_url = pdf_files[0]['file']['url']
-        source_property = props.get(NOTION_SOURCE_PROPERTY_NAME, {})
-        source = source_property.get('select', {}).get('name', 'auto')
 
-        print(f"Rozpoczynam przetwarzanie pliku z URL: {pdf_url}")
+        print(f"DIAGNOSTYKA: Pobieram plik z URL: {pdf_url}")
         async with httpx.AsyncClient() as client:
             response = await client.get(pdf_url)
             response.raise_for_status()
             pdf_bytes = response.content
 
-        parsed_data = parse_bik_pdf(pdf_bytes, source=source)
-
-        if not parsed_data:
-            print("Błąd: Parser nie zwrócił żadnych danych.")
-            raise HTTPException(status_code=400, detail="Nie znaleziono danych do przetworzenia w pliku PDF")
-
-        print(f"Znaleziono {len(parsed_data)} rekordów. (Logika uploadu i aktualizacji Notion jest uproszczona)")
+        print("DIAGNOSTYKA: Uruchamiam funkcję diagnostyczną na pliku PDF.")
+        # Wywołanie nowej funkcji diagnostycznej
+        diagnostic_text = diagnose_pdf_text(pdf_bytes)
         
-        # W tym miejscu powinna znaleźć się logika uploadu pliku Excel i aktualizacji strony Notion
-        
-        return {"message": f"Plik dla strony {page_id} został przetworzony pomyślnie."}
+        # Zwróć wynik diagnozy bezpośrednio jako treść błędu.
+        # To pozwoli nam zobaczyć, co jest w środku PDF.
+        raise HTTPException(status_code=400, detail=diagnostic_text)
 
     except Exception as e:
         print(f"Wystąpił krytyczny błąd: {e}")
+        # Przekaż dalej oryginalny błąd, jeśli wystąpił przed diagnozą
         raise HTTPException(status_code=500, detail=f"Błąd serwera: {str(e)}")
