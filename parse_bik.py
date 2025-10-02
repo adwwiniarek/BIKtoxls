@@ -1,4 +1,4 @@
-# parse_bik.py (fixed)
+# parse_bik.py (fixed and improved)
 import fitz, re
 
 # --- Normalizacja tekstu (spacje niełamliwe, wąskie spacje, separatory tysięcy) ---
@@ -15,7 +15,7 @@ def _normalize_text(s: str) -> str:
     s = re.sub(r"[ \t]+", " ", s).strip()
     return s
 
-# --- Sekcje / kotwice jak u Ciebie ---
+# --- Sekcje / kotwice ---
 RE_ACTIVE = re.compile(r"Zobowiązania\s+finansowe\s*-\s*w\s*trakcie\s*spłaty", re.I)
 RE_CLOSED = re.compile(r"Zobowiązania\s+finansowe\s*-\s*zamknięte", re.I)
 RE_INFO   = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.I)
@@ -59,66 +59,63 @@ def _is_upper(line: str) -> bool:
     letters = re.sub(r"[^A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]", "", line)
     return bool(letters) and line == line.upper()
 
-def _lender_block(lines, idx, max_up=8):
-    parts, j = [], idx-1
-    while j >= 0 and len(parts) < max_up and _is_upper(lines[j]):
-        parts.insert(0, lines[j]); j -= 1
-    lender = " ".join(parts).strip()
-    return re.sub(r"\s+", " ", lender), j  # j wskazuje na linię nad blokiem
-
-def _product_above(lines, j_above):
-    if j_above >= 0:
-        prod = lines[j_above].strip()
-        if not _is_upper(prod):  # produkt nie jest wersalikami
-            return re.sub(r"\s+", " ", prod)
-    return ""
-
 def _parse_amount(tok: str, pos: int):
     up = tok.upper().strip()
     if up == "ND":   return None
-    if up == "BRAK": return 0.0 if pos == 3 else None  # BRAK tylko dla „Suma zaległości”
-    # liczby: po _normalize_text separatory tysięcy usunięte, więc wystarczy zamiana przecinka
+    if up == "BRAK": return 0.0 if pos == 3 else None
     t = up.replace("PLN", "").strip()
     t = t.replace(",", ".")
-    # dopuszczamy "0", "0.00" itd.
     try:
         return float(t)
     except:
         return None
 
 def _collect_from_same_line(line: str):
-    """
-    Wiersz tabeli ma postać:
-    DD.MM.RRRR <k1> <k2> <k3> <k4>
-    gdzie każda kolumna może być: liczba (z/bez PLN), 0, ND, BRAK.
-    """
-    # odetnij datę (pierwszy token)
     m = RE_DATE.match(line)
     rest = line[m.end():].strip() if m else line
 
     toks = [m.group(1) for m in AMOUNT_RE.finditer(rest)]
-    # bierzemy dokładnie 4 (pierwotna, pozostało, rata, zaległości)
     toks = toks[:4] + [None]*(4-len(toks))
     return [_parse_amount(t, i) if t else None for i,t in enumerate(toks)]
+
+def _parse_entry(lines, start_index):
+    lender = ""
+    product = ""
+    date = ""
+    amounts = [None] * 4
+
+    if RE_DATE.match(lines[start_index]):
+        line = lines[start_index]
+        date = line.split()[0]
+        amounts = _collect_from_same_line(line)
+
+    j = start_index - 1
+    while j >= 0 and _is_upper(lines[j]):
+        if not lender:
+            lender = lines[j]
+        else:
+            lender = lines[j] + " " + lender
+        j -= 1
+
+    if j >= 0 and not _is_upper(lines[j]):
+        product = lines[j]
+
+    return {
+        "Źródło": "auto",
+        "Rodzaj_produktu": product.strip(),
+        "Kredytodawca": lender.strip(),
+        "Zawarcie_umowy": date,
+        "Pierwotna_kwota": amounts[0],
+        "Pozostało_do_spłaty": amounts[1],
+        "Kwota_raty": amounts[2],
+        "Suma_zaległości": amounts[3],
+    }
 
 def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
     lines = _slice_active(_read_lines(pdf_bytes))
     rows = []
-    for i,l in enumerate(lines):
+    for i, l in enumerate(lines):
         if RE_DATE.search(l):
-            data = l.split()[0]
-            lender, j  = _lender_block(lines, i)
-            product    = _product_above(lines, j)
-            k1,k2,k3,k4 = _collect_from_same_line(l)
-
-            rows.append({
-                "Źródło": source,
-                "Rodzaj_produktu": product,
-                "Kredytodawca": lender,
-                "Zawarcie_umowy": data,
-                "Pierwotna_kwota": k1,
-                "Pozostało_do_spłaty": k2,
-                "Kwota_raty": k3,
-                "Suma_zaległości": k4,
-            })
+            row_data = _parse_entry(lines, i)
+            rows.append(row_data)
     return rows
