@@ -1,17 +1,15 @@
-# parse_bik.py (final robust version - v2)
+# parse_bik.py (final version with reverse analysis logic)
 import fitz  # PyMuPDF
 import re
 from typing import List, Dict, Any, Optional
 
 # --- Stałe i wyrażenia regularne ---
-
 NBSP_CHARS = "\u00A0\u202F\u2009"
 RE_ACTIVE = re.compile(r"Zobowiązania\s+finansowe\s*-\s*w\s*trakcie\s*spłaty", re.I)
 RE_CLOSED = re.compile(r"Zobowiązania\s+finansowe\s*-\s*zamknięte", re.I)
 RE_INFO = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.I)
 RE_TOTAL = re.compile(r"^Łącznie\b", re.I)
-RE_DATE = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
-RE_FORBIDDEN_IN_UPPER = re.compile(r"(PLN|ND|BRAK|\d)")
+RE_DATE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 AMOUNT_RE = re.compile(
     r"(ND|BRAK|(?:\d{1,3}(?:[ .]\d{3})*|\d+)(?:[.,]\d{2})?)(?:\s*PLN)?",
     re.I
@@ -39,49 +37,26 @@ def _read_lines(pdf_bytes: bytes) -> List[str]:
 
 def _slice_active_section(lines: List[str]) -> List[str]:
     start_index = next((i for i, line in enumerate(lines) if RE_ACTIVE.search(line)), None)
-    if start_index is None:
-        return []
-
+    if start_index is None: return []
     end_index = len(lines)
     for j in range(start_index + 1, len(lines)):
-        if RE_CLOSED.search(lines[j]) or RE_INFO.search(lines[j]) or RE_ACTIVE.search(lines[j]) or RE_TOTAL.search(lines[j]):
+        if RE_CLOSED.search(lines[j]) or RE_INFO.search(lines[j]) or RE_TOTAL.search(lines[j]):
             end_index = j
             break
     return lines[start_index + 1 : end_index]
 
-# --- Funkcje pomocnicze do identyfikacji typów linii ---
-
-def _is_lender(line: str) -> bool:
-    if RE_FORBIDDEN_IN_UPPER.search(line):
-        return False
-    letters = re.sub(r"[^a-zA-ZĄąĆćĘęŁłŃńÓóŚśŹźŻż]", "", line)
-    return bool(letters) and line == line.upper()
+# --- Funkcje pomocnicze do identyfikacji i parsowania danych ---
 
 def _is_just_amounts(line: str) -> bool:
-    """Sprawdza, czy linia składa się wyłącznie z kwot i waluty."""
-    # Jeśli data jest w linii, to nie jest to linia "tylko z kwotami"
-    if RE_DATE.search(line):
-        return False
-    
-    # Usuń wszystko, co pasuje do wzorca kwoty
     line_without_amounts = AMOUNT_RE.sub("", line).strip()
-    # Usuń pozostałości, takie jak "PLN", które mogły nie zostać usunięte przez regex
     line_without_currency = re.sub(r'(PLN)', '', line_without_amounts, flags=re.I).strip()
-    
-    # Jeśli po usunięciu kwot i walut nic nie zostało, to była to linia tylko z kwotami.
     return not bool(line_without_currency)
 
-# --- Funkcje pomocnicze do parsowania danych finansowych ---
-
 def _parse_amount(tok: Optional[str], position: int) -> Optional[float]:
-    if tok is None:
-        return None
+    if tok is None: return None
     up = tok.upper().strip()
-    if up == "ND":
-        return None
-    if up == "BRAK":
-        return 0.0 if position == 3 else None
-    
+    if up == "ND": return None
+    if up == "BRAK": return 0.0
     t = up.replace("PLN", "").strip().replace(",", ".")
     try:
         return float(t)
@@ -93,7 +68,7 @@ def _collect_amounts_from_line(line: str) -> List[Optional[float]]:
     padded_tokens = tokens + [None] * (4 - len(tokens))
     return [_parse_amount(tok, i) for i, tok in enumerate(padded_tokens[:4])]
 
-# --- Główna funkcja parsowania ---
+# --- GŁÓWNA LOGIKA PARSOWANIA ---
 
 def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]]:
     all_lines = _read_lines(pdf_bytes)
@@ -102,68 +77,63 @@ def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]
     if not active_lines:
         return []
 
-    blocks = []
-    current_block = []
-    if active_lines:
-        for line in active_lines:
-            if _is_lender(line) and current_block:
-                blocks.append(current_block)
-                current_block = [line]
-            else:
-                current_block.append(line)
-        if current_block:
-            blocks.append(current_block)
+    # Krok 1: Znajdź wszystkie "kotwice" (indeksy linii z datami)
+    anchor_indices = [i for i, line in enumerate(active_lines) if RE_DATE.search(line)]
+    if not anchor_indices:
+        return []
 
     final_rows = []
-    for block in blocks:
-        lender = ""
-        product = ""
+    # Krok 2: Dla każdej kotwicy, stwórz i przeanalizuj jej blok kontekstowy
+    for i, anchor_index in enumerate(anchor_indices):
+        # Określ granice bloku: od poprzedniej kotwicy (lub początku) do bieżącej kotwicy
+        start_bound = anchor_indices[i-1] + 1 if i > 0 else 0
+        current_block = active_lines[start_bound : anchor_index + 1]
+
+        if not current_block:
+            continue
+
+        # Inicjalizacja danych dla bieżącego rekordu
         date_str = ""
-        
-        # Inicjalizuj puste kwoty
+        product = ""
+        lender_parts = []
         amounts = [None] * 4
 
-        # Linie, które nie są kredytodawcą
-        other_lines = []
-
-        lender_lines = []
-        is_lender_part = True
-        for line in block:
-            if _is_lender(line) and is_lender_part:
-                lender_lines.append(line)
-            else:
-                is_lender_part = False
-                other_lines.append(line)
-        lender = " ".join(lender_lines)
-
-        # Znajdź produkt (linia, która nie jest kwotą ani datą)
-        for line in other_lines:
-            if not RE_DATE.search(line) and not _is_just_amounts(line):
+        # Krok 3: Analiza wsteczna wewnątrz bloku
+        # Ostatnia linia bloku to nasza kotwica - linia z datą
+        date_line = current_block[-1]
+        date_match = RE_DATE.search(date_line)
+        if date_match:
+            date_str = date_match.group(1)
+        
+        # Zbierz kwoty z całego bloku, priorytetyzując od dołu do góry
+        for line in reversed(current_block):
+            line_amounts = _collect_amounts_from_line(line)
+            for j in range(4):
+                if amounts[j] is None and line_amounts[j] is not None:
+                    amounts[j] = line_amounts[j]
+        
+        # Linie kontekstowe (wszystko oprócz linii z datą)
+        context_lines = current_block[:-1]
+        
+        # Szukaj produktu i kredytodawcy od dołu do góry w liniach kontekstowych
+        found_product = False
+        for line in reversed(context_lines):
+            # Jeśli linia zawiera tylko kwoty, ignorujemy ją
+            if _is_just_amounts(line):
+                continue
+            
+            # Pierwsza linia "tekstowa" od dołu to produkt
+            if not found_product:
                 product = line
-                break
-        
-        # Znajdź datę
-        for line in other_lines:
-            if RE_DATE.search(line):
-                date_str = RE_DATE.search(line).group(0).strip()
-                break # Zakładamy jedną datę na blok
-        
-        if not date_str:
-             continue # Jeśli w bloku nie ma daty, pomijamy go
-             
-        # Zbierz kwoty z wszystkich linii w bloku, które nie są kredytodawcą ani produktem
-        # To pozwoli połączyć kwoty z różnych linii
-        for line in other_lines:
-             if line != product:
-                line_amounts = _collect_amounts_from_line(line)
-                for i in range(4):
-                    if amounts[i] is None and line_amounts[i] is not None:
-                        amounts[i] = line_amounts[i]
+                found_product = True
+            # Wszystkie kolejne linie "tekstowe" to części nazwy kredytodawcy
+            else:
+                lender_parts.insert(0, line)
 
         final_rows.append({
             "Źródło": source,
             "Rodzaj_produktu": product.strip(),
-            "Kredytodawca": lender.strip(),
+            "Kredytodawca": " ".join(lender_parts).strip(),
             "Zawarcie_umowy": date_str,
             "Pierwotna_kwota": amounts[0],
             "Pozostało_do_spłaty": amounts[1],
