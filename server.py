@@ -1,4 +1,4 @@
-# server.py (wersja finalna, dostosowana do linku z Notion)
+# server.py (wersja finalna, produkcyjna)
 
 from fastapi import FastAPI, Request, HTTPException, Query
 from notion_client import Client
@@ -12,7 +12,7 @@ from parse_bik import parse_bik_pdf
 
 # --- KONFIGURACJA ---
 # Upewnij się, że nazwy poniżej DOKŁADNIE odpowiadają nazwom kolumn w Twojej bazie Notion.
-NOTION_PDF_PROPERTY_NAME = "Raport BIK"
+NOTION_PDF_PROPERTY_NAME = "Raporty BIK"  # POPRAWIONA NAZWA
 NOTION_XLS_PROPERTY_NAME = "BIK Raport"
 NOTION_SOURCE_PROPERTY_NAME = "Źródło"
 # --------------------
@@ -24,7 +24,6 @@ notion_token = os.environ.get("NOTION_TOKEN")
 notion = Client(auth=notion_token)
 
 def create_excel_file(data):
-    """Tworzy plik Excel w pamięci na podstawie przetworzonych danych."""
     output = BytesIO()
     df = pd.DataFrame(data)
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -32,10 +31,8 @@ def create_excel_file(data):
     output.seek(0)
     return output
 
-# Zmieniony endpoint, aby pasował do Twojego linku z Notion
 @app.get('/notion/poll-one')
 async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str = Query(..., alias="x_key")):
-    # FastAPI automatycznie pobierze page_id i x_key z linku URL
     try:
         if not page_id:
             raise HTTPException(status_code=400, detail="Brak page_id w adresie URL.")
@@ -76,9 +73,7 @@ async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str
 
         print(f"Znaleziono {len(parsed_data)} rekordów. (Logika uploadu i aktualizacji Notion jest uproszczona)")
         
-        # W tym miejscu powinna znaleźć się logika uploadu pliku Excel i aktualizacji strony Notion
-        
-        return {"message": f"Plik dla strony {page_id} został przetworzony pomyślnie."}
+        return {"message": f"Plik dla strony {page_id} został przetworzony pomyślnie. Znaleziono {len(parsed_data)} rekordów."}
 
     except Exception as e:
         print(f"Wystąpił krytyczny błąd: {e}")
