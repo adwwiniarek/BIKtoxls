@@ -1,6 +1,6 @@
-# server.py (wersja dla FastAPI)
+# server.py (wersja finalna, dostosowana do linku z Notion)
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from notion_client import Client
 import httpx
 import pandas as pd
@@ -12,9 +12,9 @@ from parse_bik import parse_bik_pdf
 
 # --- KONFIGURACJA ---
 # Upewnij się, że nazwy poniżej DOKŁADNIE odpowiadają nazwom kolumn w Twojej bazie Notion.
-NOTION_PDF_PROPERTY_NAME = "Raport BIK"  # <-- ZMIEŃ TĘ NAZWĘ, jeśli w Notion nazywa się inaczej
-NOTION_XLS_PROPERTY_NAME = "BIK Raport"  # <-- ZMIEŃ TĘ NAZWĘ, jeśli w Notion nazywa się inaczej
-NOTION_SOURCE_PROPERTY_NAME = "Źródło"   # <-- ZMIEŃ TĘ NAZWĘ, jeśli w Notion nazywa się inaczej
+NOTION_PDF_PROPERTY_NAME = "Raport BIK"
+NOTION_XLS_PROPERTY_NAME = "BIK Raport"
+NOTION_SOURCE_PROPERTY_NAME = "Źródło"
 # --------------------
 
 app = FastAPI()
@@ -27,20 +27,18 @@ def create_excel_file(data):
     """Tworzy plik Excel w pamięci na podstawie przetworzonych danych."""
     output = BytesIO()
     df = pd.DataFrame(data)
-    # Używamy pandas, które pod spodem korzysta z openpyxl do zapisu .xlsx
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='BIK_Raport')
     output.seek(0)
     return output
 
-@app.post('/webhook')
-async def webhook(request: Request):
+# Zmieniony endpoint, aby pasował do Twojego linku z Notion
+@app.get('/notion/poll-one')
+async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str = Query(..., alias="x_key")):
+    # FastAPI automatycznie pobierze page_id i x_key z linku URL
     try:
-        data = await request.json()
-        page_id = data.get('pageId')
-
         if not page_id:
-            raise HTTPException(status_code=400, detail="Brak pageId w żądaniu od Notion.")
+            raise HTTPException(status_code=400, detail="Brak page_id w adresie URL.")
 
         print(f"Otrzymano żądanie dla strony: {page_id}")
         page_data = notion.pages.retrieve(page_id=page_id)
@@ -80,7 +78,7 @@ async def webhook(request: Request):
         
         # W tym miejscu powinna znaleźć się logika uploadu pliku Excel i aktualizacji strony Notion
         
-        return {"message": "Plik przetworzony pomyślnie."}
+        return {"message": f"Plik dla strony {page_id} został przetworzony pomyślnie."}
 
     except Exception as e:
         print(f"Wystąpił krytyczny błąd: {e}")
