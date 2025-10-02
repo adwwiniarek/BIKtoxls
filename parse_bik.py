@@ -1,4 +1,4 @@
-# parse_bik.py (The Grand Finale Version)
+# parse_bik.py (The Grand Finale Version - Syntax Fixed)
 import fitz
 import re
 import unicodedata
@@ -114,8 +114,8 @@ def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]
         if all_text_lines:
             all_text_lines = [line for line in all_text_lines if line]
             if all_text_lines:
-                product = all_text_lines.pop(-pobranie kwoty, pozostałej do spłaty, raty, zaległości
-1)
+                # TA LINIJKA JEST POPRAWIONA
+                product = all_text_lines.pop(-1)
                 lender = " ".join(all_text_lines)
 
         parsed_amounts = [_parse_amount(tok) for tok in all_amount_tokens]
