@@ -12,7 +12,7 @@ from parse_bik import parse_bik_pdf
 
 # --- KONFIGURACJA ---
 # Upewnij się, że nazwy poniżej DOKŁADNIE odpowiadają nazwom kolumn w Twojej bazie Notion.
-NOTION_PDF_PROPERTY_NAME = "Raport BIK"
+NOTION_PDF_PROPERTY_NAME = "Raporty BIK"
 NOTION_XLS_PROPERTY_NAME = "BIK Raport"
 NOTION_SOURCE_PROPERTY_NAME = "Źródło"
 # --------------------
