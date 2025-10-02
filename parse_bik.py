@@ -1,8 +1,7 @@
-# parse_bik.py (final fixed and improved version)
+# parse_bik.py (final, definitive version)
 import fitz, re
 
 # --- Normalizacja tekstu (spacje niełamliwe, wąskie spacje, separatory tysięcy) ---
-
 NBSP_CHARS = "\u00A0\u202F\u2009"  # NBSP, narrow no-break, thin space
 
 def _normalize_text(s: str) -> str:
@@ -15,10 +14,10 @@ def _normalize_text(s: str) -> str:
 # --- Sekcje / kotwice ---
 RE_ACTIVE = re.compile(r"Zobowiązania\s+finansowe\s*-\s*w\s*trakcie\s*spłaty", re.I)
 RE_CLOSED = re.compile(r"Zobowiązania\s+finansowe\s*-\s*zamknięte", re.I)
-RE_INFO   = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.I)
-RE_TOTAL  = re.compile(r"^Łącznie\b", re.I)
-RE_DATE   = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
-RE_ANYD   = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+RE_INFO = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.I)
+RE_TOTAL = re.compile(r"^Łącznie\b", re.I)
+RE_DATE = re.compile(r"^\s*\d{2}\.\d{2}\.\d{4}\b")
+RE_ANYD = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 RE_FORBID = re.compile(r"(PLN|ND|BRAK|\d)")
 
 # Kwota: ND | BRAK | liczba (z opcjonalnymi tysiącami i groszami) + opcjonalne "PLN"
@@ -40,14 +39,18 @@ def _read_lines(pdf_bytes: bytes):
     return lines
 
 def _slice_active(lines):
-    s = next((i for i,l in enumerate(lines) if RE_ACTIVE.search(l)), None)
-    if s is None: return []
+    s = next((i for i, l in enumerate(lines) if RE_ACTIVE.search(l)), None)
+    if s is None:
+        return []
     e = len(lines)
-    for j in range(s+1, len(lines)):
+    for j in range(s + 1, len(lines)):
         if RE_CLOSED.search(lines[j]) or RE_INFO.search(lines[j]) or RE_ACTIVE.search(lines[j]):
-            e = j; break
-    for k in range(s+1, e):
-        if RE_TOTAL.search(lines[k]): e = k; break
+            e = j
+            break
+    for k in range(s + 1, e):
+        if RE_TOTAL.search(lines[k]):
+            e = k
+            break
     return lines[s:e]
 
 def _is_upper(line: str) -> bool:
@@ -58,8 +61,10 @@ def _is_upper(line: str) -> bool:
 
 def _parse_amount(tok: str, pos: int):
     up = tok.upper().strip()
-    if up == "ND":   return None
-    if up == "BRAK": return 0.0 if pos == 3 else None
+    if up == "ND":
+        return None
+    if up == "BRAK":
+        return 0.0 if pos == 3 else None
     t = up.replace("PLN", "").strip()
     t = t.replace(",", ".")
     try:
@@ -72,33 +77,56 @@ def _collect_from_same_line(line: str):
     rest = line[m.end():].strip() if m else line
 
     toks = [m.group(1) for m in AMOUNT_RE.finditer(rest)]
-    toks = toks[:4] + [None]*(4-len(toks))
-    return [_parse_amount(t, i) if t else None for i,t in enumerate(toks)]
+    toks = toks[:4] + [None] * (4 - len(toks))
+    return [_parse_amount(t, i) if t else None for i, t in enumerate(toks)]
 
-def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
-    lines = _slice_active(_read_lines(pdf_bytes))
-    rows = []
-    current_lender = ""
-    current_product = ""
+def _identify_blocks(lines):
+    blocks = []
+    current_block_start = -1
 
     for i, line in enumerate(lines):
         if _is_upper(line):
-            current_lender = line
-            current_product = ""
-        elif not current_product and not _is_upper(line) and not RE_DATE.search(line) and not RE_TOTAL.search(line):
-            current_product = line
-        elif RE_DATE.search(line):
-            data = line.split()[0]
-            k1, k2, k3, k4 = _collect_from_same_line(line)
-            
-            rows.append({
-                "Źródło": source,
-                "Rodzaj_produktu": current_product,
-                "Kredytodawca": current_lender,
-                "Zawarcie_umowy": data,
-                "Pierwotna_kwota": k1,
-                "Pozostało_do_spłaty": k2,
-                "Kwota_raty": k3,
-                "Suma_zaległości": k4,
-            })
+            if current_block_start != -1:
+                blocks.append(lines[current_block_start:i])
+            current_block_start = i
+
+    if current_block_start != -1:
+        blocks.append(lines[current_block_start:])
+
+    return blocks
+
+def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
+    lines = _slice_active(_read_lines(pdf_bytes))
+    blocks = _identify_blocks(lines)
+    rows = []
+
+    for block in blocks:
+        if not block:
+            continue
+
+        lender = block[0]
+        product = ""
+        
+        # Znajdź produkt, pomijając puste i nieważne linie
+        for line in block[1:]:
+            if not _is_upper(line) and not RE_DATE.search(line):
+                product = line
+                break
+
+        # Parsuj wiersze z datami w bloku
+        for line in block:
+            if RE_DATE.search(line):
+                data = line.split()[0]
+                k1, k2, k3, k4 = _collect_from_same_line(line)
+                
+                rows.append({
+                    "Źródło": source,
+                    "Rodzaj_produktu": product,
+                    "Kredytodawca": lender,
+                    "Zawarcie_umowy": data,
+                    "Pierwotna_kwota": k1,
+                    "Pozostało_do_spłaty": k2,
+                    "Kwota_raty": k3,
+                    "Suma_zaległości": k4,
+                })
     return rows
