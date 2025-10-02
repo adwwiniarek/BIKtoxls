@@ -1,4 +1,4 @@
-# parse_bik.py (fixed and improved)
+# parse_bik.py (final fixed and improved version)
 import fitz, re
 
 # --- Normalizacja tekstu (spacje niełamliwe, wąskie spacje, separatory tysięcy) ---
@@ -6,12 +6,9 @@ import fitz, re
 NBSP_CHARS = "\u00A0\u202F\u2009"  # NBSP, narrow no-break, thin space
 
 def _normalize_text(s: str) -> str:
-    # 1) Zamień różne spacje na zwykłą
     if any(c in s for c in NBSP_CHARS):
         s = re.sub(f"[{NBSP_CHARS}]", " ", s)
-    # 2) Usuń separatory tysięcy (kropka/spacja) TYLKO między cyframi (np. 25.298 -> 25298, 2 045 -> 2045)
     s = re.sub(r"(?<=\d)[ .](?=\d{3}\b)", "", s)
-    # 3) Standaryzuj wielokrotne spacje
     s = re.sub(r"[ \t]+", " ", s).strip()
     return s
 
@@ -78,44 +75,30 @@ def _collect_from_same_line(line: str):
     toks = toks[:4] + [None]*(4-len(toks))
     return [_parse_amount(t, i) if t else None for i,t in enumerate(toks)]
 
-def _parse_entry(lines, start_index):
-    lender = ""
-    product = ""
-    date = ""
-    amounts = [None] * 4
-
-    if RE_DATE.match(lines[start_index]):
-        line = lines[start_index]
-        date = line.split()[0]
-        amounts = _collect_from_same_line(line)
-
-    j = start_index - 1
-    while j >= 0 and _is_upper(lines[j]):
-        if not lender:
-            lender = lines[j]
-        else:
-            lender = lines[j] + " " + lender
-        j -= 1
-
-    if j >= 0 and not _is_upper(lines[j]):
-        product = lines[j]
-
-    return {
-        "Źródło": "auto",
-        "Rodzaj_produktu": product.strip(),
-        "Kredytodawca": lender.strip(),
-        "Zawarcie_umowy": date,
-        "Pierwotna_kwota": amounts[0],
-        "Pozostało_do_spłaty": amounts[1],
-        "Kwota_raty": amounts[2],
-        "Suma_zaległości": amounts[3],
-    }
-
 def parse_bik_pdf(pdf_bytes: bytes, source="auto"):
     lines = _slice_active(_read_lines(pdf_bytes))
     rows = []
-    for i, l in enumerate(lines):
-        if RE_DATE.search(l):
-            row_data = _parse_entry(lines, i)
-            rows.append(row_data)
+    current_lender = ""
+    current_product = ""
+
+    for i, line in enumerate(lines):
+        if _is_upper(line):
+            current_lender = line
+            current_product = ""
+        elif not current_product and not _is_upper(line) and not RE_DATE.search(line) and not RE_TOTAL.search(line):
+            current_product = line
+        elif RE_DATE.search(line):
+            data = line.split()[0]
+            k1, k2, k3, k4 = _collect_from_same_line(line)
+            
+            rows.append({
+                "Źródło": source,
+                "Rodzaj_produktu": current_product,
+                "Kredytodawca": current_lender,
+                "Zawarcie_umowy": data,
+                "Pierwotna_kwota": k1,
+                "Pozostało_do_spłaty": k2,
+                "Kwota_raty": k3,
+                "Suma_zaległości": k4,
+            })
     return rows
