@@ -1,11 +1,13 @@
-# parse_bik.py (Final Brute Force Attempt)
+# parse_bik.py (The Final "Anti-Glue" Version)
 import fitz
 import re
 import unicodedata
 from typing import List, Dict, Any, Optional
 
-RE_CLOSED = re.compile(r"Zobowiązania\s+finansowe.*zamknięte", re.I)
-RE_INFO = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.I)
+# OSTATECZNY, SUPER-ELASTYCZNY REGEX, który akceptuje brak spacji
+RE_ACTIVE = re.compile(r"Zobowiązania\s*finansowe.*?w\s*trakcie\s*spłaty", re.I)
+RE_CLOSED = re.compile(r"Zobowiązania\s*finansowe.*?zamknięte", re.I)
+RE_INFO = re.compile(r"Informacje\s*dodatkowe|Informacje\s*szczegółowe", re.I)
 RE_TOTAL = re.compile(r"^Łącznie\b", re.I)
 RE_DATE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 AMOUNT_RE = re.compile(
@@ -36,22 +38,22 @@ def _read_lines(pdf_bytes: bytes) -> List[str]:
 def _slice_active_section(lines: List[str]) -> List[str]:
     start_index = -1
     header_line_content = ""
+    header_match = None
     for i, line in enumerate(lines):
-        # OSTATECZNA ZMIANA: Zamiast regex, proste wyszukiwanie fragmentów tekstu
-        line_lower = line.lower()
-        if "zobowiązania finansowe" in line_lower and "w trakcie spłaty" in line_lower:
+        match = RE_ACTIVE.search(line)
+        if match:
             start_index = i
             header_line_content = line
+            header_match = match
             break
     if start_index == -1:
         return []
 
-    # Znajdź pozycję końca nagłówka, używając tej samej logiki
-    match_end_pos = header_line_content.lower().rfind("w trakcie spłaty") + len("w trakcie spłaty")
-    first_line_of_data = header_line_content[match_end_pos:].strip()
-    
+    first_line_of_data = header_line_content[header_match.end():].strip()
+
     end_index = len(lines)
     for j in range(start_index + 1, len(lines)):
+        # Używamy równie elastycznych regexów do znalezienia końca sekcji
         if RE_CLOSED.search(lines[j]) or RE_INFO.search(lines[j]) or RE_TOTAL.search(lines[j]):
             end_index = j
             break
