@@ -1,4 +1,4 @@
-# server.py (The Absolute Final Version with Dynamic Filename)
+# server.py (Final Version for TXT: XLS Download + Notion Table)
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from notion_client import Client
@@ -11,8 +11,6 @@ import re
 from parse_bik import parse_bik_txt
 
 NOTION_TXT_PROPERTY_NAME = "Raporty BIK"
-# Zakładamy, że główna kolumna (nazwa klienta) w Notion nazywa się 'Name'
-# Jeśli jest inaczej (np. 'Klient', 'Tytuł'), zmień tę wartość
 NOTION_CLIENT_NAME_PROPERTY = "Name" 
 
 app = FastAPI()
@@ -88,21 +86,17 @@ async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str
         
         background_tasks.add_task(update_notion_page_with_table, page_id, all_parsed_data)
 
-        # --- NOWA LOGIKA: Dynamiczna nazwa pliku ---
-        client_name = "Raport" # Domyślna nazwa
+        client_name = "Raport"
         name_property = props.get(NOTION_CLIENT_NAME_PROPERTY, {}).get('title', [])
         if name_property:
             client_name = name_property[0].get('plain_text', 'Raport')
         
-        # Tworzenie bezpiecznej nazwy pliku
-        safe_client_name = re.sub(r'[\\/*?:"<>|]', "", client_name) # Usuń niedozwolone znaki
+        safe_client_name = re.sub(r'[\\/*?:"<>|]', "", client_name)
         filename = f"{safe_client_name} wierzytelnosci.xlsx"
         
         excel_stream = create_excel_file_stream(all_parsed_data)
         
-        headers = {
-            'Content-Disposition': f'attachment; filename="{filename}"'
-        }
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
         
         return StreamingResponse(excel_stream, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
 
