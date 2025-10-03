@@ -1,4 +1,4 @@
-# parse_bik.py (The Final, Correct and Tested TXT Parser)
+# parse_bik.py (The Final Version - Handles Both TXT Structures)
 import re
 from typing import List, Dict, Any, Optional
 
@@ -73,18 +73,28 @@ def parse_bik_txt(text_content: str, source: str = "auto") -> List[Dict[str, Any
         full_text_chunk = " ".join(all_text_lines)
         words = [word for word in full_text_chunk.split() if word]
         
+        # --- NOWA, INTELIGENTNA LOGIKA PODZIAŁU ---
         lender_start_index = -1
+        lender_end_index = -1
+        
         for idx, word in enumerate(words):
             if any(keyword in word.upper() for keyword in LENDER_KEYWORDS):
-                lender_start_index = idx
-                break
-        
+                if lender_start_index == -1:
+                    lender_start_index = idx
+                lender_end_index = idx
+
         if lender_start_index != -1:
-            product = " ".join(words[:lender_start_index])
-            lender = " ".join(words[lender_start_index:])
-        elif words:
-            product = " ".join(words[:-1]) if len(words) > 1 else "Nie określono"
-            lender = words[-1]
+            # Heurystyka: jeśli słowo kluczowe jest na początku, to kolejność jest [Kredytodawca] [Produkt]
+            if lender_start_index <= 1:
+                lender = " ".join(words[lender_start_index : lender_end_index + 1])
+                product = " ".join(words[lender_end_index + 1 :])
+            # W przeciwnym wypadku, kolejność to [Produkt] [Kredytodawca]
+            else:
+                product = " ".join(words[:lender_start_index])
+                lender = " ".join(words[lender_start_index:])
+        else: # Fallback
+            product = full_text_chunk
+            lender = "Nie znaleziono"
 
         parsed_amounts = [_parse_amount(tok) for tok in all_amount_tokens]
         final_amounts = (parsed_amounts + [None] * 4)[:4]
@@ -96,3 +106,4 @@ def parse_bik_txt(text_content: str, source: str = "auto") -> List[Dict[str, Any
         })
 
     return final_rows
+    
