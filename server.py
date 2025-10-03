@@ -1,4 +1,4 @@
-# server.py (Final Production Version with Notion Table Update)
+# server.py (Final Version with Correct Notion Table Generation)
 from fastapi import FastAPI, Request, HTTPException, Query
 from notion_client import Client
 import httpx
@@ -18,35 +18,48 @@ app = FastAPI()
 notion_token = os.environ.get("NOTION_TOKEN")
 notion = Client(auth=notion_token)
 
-# Funkcja do konwersji danych na format, który rozumie Notion API
+# === POPRAWIONA FUNKCJA ===
 def convert_data_to_notion_table(data):
-    header = [key for key in data[0].keys()]
-    rows = []
+    """Konwertuje listę słowników na blok tabeli zgodny z API Notion."""
+    header_keys = list(data[0].keys())
+    
+    # Pierwszy wiersz to nagłówek
+    header_row = {
+        "type": "table_row",
+        "table_row": {
+            "cells": [[{"type": "text", "text": {"content": str(key)}}] for key in header_keys]
+        }
+    }
+    
+    # Reszta wierszy to dane
+    data_rows = []
     for item in data:
-        cells = []
-        for key in header:
+        row_cells = []
+        for key in header_keys:
             value = item.get(key)
-            if value is None:
-                cells.append({"name": "rich_text", "rich_text": [{"type": "text", "text": {"content": ""}}]})
-            elif isinstance(value, (int, float)):
-                 cells.append({"name": "rich_text", "rich_text": [{"type": "text", "text": {"content": str(value)}}]})
-            else:
-                 cells.append({"name": "rich_text", "rich_text": [{"type": "text", "text": {"content": str(value)}}]})
-        rows.append({"type": "table_row", "cells": cells})
+            # Każda komórka musi być listą obiektów rich_text
+            cell_content = [{"type": "text", "text": {"content": str(value) if value is not None else ""}}]
+            row_cells.append(cell_content)
+        data_rows.append({
+            "type": "table_row",
+            "table_row": {
+                "cells": row_cells
+            }
+        })
 
+    # Złożenie finalnego bloku tabeli
     return {
         "type": "table",
         "table": {
-            "table_width": len(header),
-            "has_column_header": True,
+            "table_width": len(header_keys),
+            "has_column_header": True, # Ta opcja pogrubi nagłówek w Notion
             "has_row_header": False,
             "children": [
-                {"type": "table_row", "cells": [[{"type": "text", "text": {"content": h}}] for h in header]},
-                *rows
+                header_row,
+                *data_rows
             ]
         }
     }
-
 
 @app.get('/notion/poll-one')
 async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str = Query(..., alias="x_key")):
