@@ -1,15 +1,9 @@
-# parse_bik.py (Final Intelligent Result Version)
+# parse_bik.py (Final Brute Force Attempt)
 import fitz
 import re
 import unicodedata
-from typing import List, Dict, Any, Optional, TypedDict
+from typing import List, Dict, Any, Optional
 
-class ParseResult(TypedDict):
-    rows: List[Dict[str, Any]]
-    lines_read: int
-    active_lines_found: bool
-
-RE_ACTIVE = re.compile(r"Zobowiązania\s+finansowe.*w\s+trakcie\s+spłaty", re.I)
 RE_CLOSED = re.compile(r"Zobowiązania\s+finansowe.*zamknięte", re.I)
 RE_INFO = re.compile(r"Informacje\s+dodatkowe|Informacje\s+szczegółowe", re.I)
 RE_TOTAL = re.compile(r"^Łącznie\b", re.I)
@@ -39,26 +33,31 @@ def _read_lines(pdf_bytes: bytes) -> List[str]:
                     lines.append(cleaned_line)
     return lines
 
-def _slice_active_section(lines: List[str]) -> (List[str], bool):
+def _slice_active_section(lines: List[str]) -> List[str]:
     start_index = -1
     header_line_content = ""
     for i, line in enumerate(lines):
-        if RE_ACTIVE.search(line):
+        # OSTATECZNA ZMIANA: Zamiast regex, proste wyszukiwanie fragmentów tekstu
+        line_lower = line.lower()
+        if "zobowiązania finansowe" in line_lower and "w trakcie spłaty" in line_lower:
             start_index = i
             header_line_content = line
             break
     if start_index == -1:
-        return [], False
+        return []
 
-    header_match = RE_ACTIVE.search(header_line_content)
-    first_line_of_data = header_line_content[header_match.end():].strip()
+    # Znajdź pozycję końca nagłówka, używając tej samej logiki
+    match_end_pos = header_line_content.lower().rfind("w trakcie spłaty") + len("w trakcie spłaty")
+    first_line_of_data = header_line_content[match_end_pos:].strip()
+    
     end_index = len(lines)
     for j in range(start_index + 1, len(lines)):
         if RE_CLOSED.search(lines[j]) or RE_INFO.search(lines[j]) or RE_TOTAL.search(lines[j]):
             end_index = j
             break
+            
     active_lines = [first_line_of_data] + lines[start_index + 1 : end_index]
-    return [line for line in active_lines if line], True
+    return [line for line in active_lines if line]
 
 def _parse_amount(tok: Optional[str]) -> Optional[float]:
     if tok is None: return None
@@ -72,17 +71,16 @@ def _parse_amount(tok: Optional[str]) -> Optional[float]:
 def _collect_amounts_from_line(line: str) -> List[Optional[str]]:
     return [match.group(1) for match in AMOUNT_RE.finditer(line)]
 
-def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> ParseResult:
+def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]]:
     all_lines = _read_lines(pdf_bytes)
-    lines_read_count = len(all_lines)
+    active_lines = _slice_active_section(all_lines)
     
-    active_lines, active_found = _slice_active_section(all_lines)
-    if not active_found:
-        return {"rows": [], "lines_read": lines_read_count, "active_lines_found": False}
+    if not active_lines:
+        return []
 
     anchor_indices = [i for i, line in enumerate(active_lines) if RE_DATE.search(line)]
     if not anchor_indices:
-        return {"rows": [], "lines_read": lines_read_count, "active_lines_found": True}
+        return []
 
     final_rows = []
     for i, anchor_index in enumerate(anchor_indices):
@@ -114,4 +112,4 @@ def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> ParseResult:
             "Kwota_raty": final_amounts[2], "Suma_zaległości": final_amounts[3],
         })
 
-    return {"rows": final_rows, "lines_read": lines_read_count, "active_lines_found": True}
+    return final_rows
