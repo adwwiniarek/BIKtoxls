@@ -1,5 +1,6 @@
-# server.py (Final Version with Correct Notion Table Generation)
-from fastapi import FastAPI, Request, HTTPException, Query
+# server.py (Final Version with XLS Download)
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from notion_client import Client
 import httpx
 import pandas as pd
@@ -10,7 +11,7 @@ from parse_bik import parse_bik_txt
 
 # --- KONFIGURACJA ---
 NOTION_TXT_PROPERTY_NAME = "Raporty BIK"
-NOTION_XLS_PROPERTY_NAME = "BIK Raport" # Ta kolumna pozostaje na razie nieużywana
+NOTION_XLS_PROPERTY_NAME = "BIK Raport" # Ta kolumna pozostaje nieużywana
 NOTION_SOURCE_PROPERTY_NAME = "Źródło"
 # --------------------
 
@@ -18,48 +19,14 @@ app = FastAPI()
 notion_token = os.environ.get("NOTION_TOKEN")
 notion = Client(auth=notion_token)
 
-# === POPRAWIONA FUNKCJA ===
-def convert_data_to_notion_table(data):
-    """Konwertuje listę słowników na blok tabeli zgodny z API Notion."""
-    header_keys = list(data[0].keys())
-    
-    # Pierwszy wiersz to nagłówek
-    header_row = {
-        "type": "table_row",
-        "table_row": {
-            "cells": [[{"type": "text", "text": {"content": str(key)}}] for key in header_keys]
-        }
-    }
-    
-    # Reszta wierszy to dane
-    data_rows = []
-    for item in data:
-        row_cells = []
-        for key in header_keys:
-            value = item.get(key)
-            # Każda komórka musi być listą obiektów rich_text
-            cell_content = [{"type": "text", "text": {"content": str(value) if value is not None else ""}}]
-            row_cells.append(cell_content)
-        data_rows.append({
-            "type": "table_row",
-            "table_row": {
-                "cells": row_cells
-            }
-        })
-
-    # Złożenie finalnego bloku tabeli
-    return {
-        "type": "table",
-        "table": {
-            "table_width": len(header_keys),
-            "has_column_header": True, # Ta opcja pogrubi nagłówek w Notion
-            "has_row_header": False,
-            "children": [
-                header_row,
-                *data_rows
-            ]
-        }
-    }
+def create_excel_file_stream(data):
+    """Tworzy plik Excel w pamięci i zwraca go jako strumień bajtów."""
+    output = BytesIO()
+    df = pd.DataFrame(data)
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='BIK_Raport')
+    output.seek(0)
+    return output
 
 @app.get('/notion/poll-one')
 async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str = Query(..., alias="x_key")):
@@ -71,14 +38,10 @@ async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str
         props = page_data.get('properties', {})
         
         txt_property = props.get(NOTION_TXT_PROPERTY_NAME, {})
-        xls_property = props.get(NOTION_XLS_PROPERTY_NAME, {})
         txt_files = txt_property.get('files', [])
-        xls_files = xls_property.get('files', [])
 
         if not txt_files:
             return {"message": f"ℹ️ Brak akcji (brak pliku .TXT w kolumnie '{NOTION_TXT_PROPERTY_NAME}')"}
-        if xls_files:
-            return {"message": f"ℹ️ Brak akcji (plik XLS już istnieje w '{NOTION_XLS_PROPERTY_NAME}')"}
         
         txt_url = txt_files[0]['file']['url']
         source_property = props.get(NOTION_SOURCE_PROPERTY_NAME, {})
@@ -93,15 +56,17 @@ async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str
 
         if not parsed_data:
             raise HTTPException(status_code=400, detail="Nie znaleziono danych do przetworzenia w pliku tekstowym.")
-
-        # KROK FINALNY: Dodaj przetworzone dane jako blok tabeli na stronie Notion
-        notion_table_block = convert_data_to_notion_table(parsed_data)
-        notion.blocks.children.append(
-            block_id=page_id,
-            children=[notion_table_block]
-        )
         
-        return {"message": f"Gotowe! Dane zostały dodane jako tabela na stronie Notion. Znaleziono {len(parsed_data)} rekordów."}
+        # Tworzenie pliku Excel w pamięci
+        excel_stream = create_excel_file_stream(parsed_data)
+        
+        # Nagłówki, które zmuszą przeglądarkę do pobrania pliku
+        headers = {
+            'Content-Disposition': 'attachment; filename="BIK_Raport.xlsx"'
+        }
+        
+        # Zwrócenie pliku do przeglądarki jako odpowiedź na kliknięcie linku
+        return StreamingResponse(excel_stream, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Błąd serwera: {str(e)}")
