@@ -1,4 +1,4 @@
-# server.py (Final Version: XLS Download + Notion Table for TXT files)
+# server.py (The Absolute Final Version)
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from notion_client import Client
@@ -10,8 +10,7 @@ import os
 from parse_bik import parse_bik_txt
 
 NOTION_TXT_PROPERTY_NAME = "Raporty BIK"
-NOTION_XLS_PROPERTY_NAME = "BIK Raport" # Ta kolumna pozostaje nieużywana
-NOTION_SOURCE_PROPERTY_NAME = "Źródło"
+NOTION_XLS_PROPERTY_NAME = "BIK Raport" 
 
 app = FastAPI()
 notion_token = os.environ.get("NOTION_TOKEN")
@@ -40,7 +39,6 @@ def convert_data_to_notion_table(data):
     return {"type": "table", "table": {"table_width": len(header_keys), "has_column_header": True, "has_row_header": False, "children": [header_row, *data_rows]}}
 
 def update_notion_page_with_table(page_id: str, data: list):
-    """Funkcja działająca w tle, która dodaje tabelę do strony Notion."""
     try:
         notion_table_block = convert_data_to_notion_table(data)
         if notion_table_block:
@@ -62,28 +60,33 @@ async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str
         txt_files = txt_property.get('files', [])
 
         if not txt_files:
-            return {"message": f"ℹ️ Brak akcji (brak pliku .TXT w kolumnie '{NOTION_TXT_PROPERTY_NAME}')"}
+            return {"message": f"ℹ️ Brak akcji (brak plików .TXT w kolumnie '{NOTION_TXT_PROPERTY_NAME}')"}
         
-        txt_url = txt_files[0]['file']['url']
-        source_property = props.get(NOTION_SOURCE_PROPERTY_NAME, {})
-        source = source_property.get('select', {}).get('name', 'auto')
-
+        all_parsed_data = []
         async with httpx.AsyncClient() as client:
-            response = await client.get(txt_url)
-            response.raise_for_status()
-            text_content = response.text
+            for file_obj in txt_files:
+                txt_url = file_obj['file']['url']
+                file_name = file_obj.get('name', '').lower()
+                
+                source = "prywatny"
+                if "firmowy" in file_name:
+                    source = "firmowy"
 
-        parsed_data = parse_bik_txt(text_content, source=source)
+                response = await client.get(txt_url)
+                response.raise_for_status()
+                text_content = response.text
 
-        if not parsed_data:
-            raise HTTPException(status_code=400, detail="Nie znaleziono danych do przetworzenia w pliku tekstowym.")
+                parsed_data = parse_bik_txt(text_content, source=source)
+                if parsed_data:
+                    all_parsed_data.extend(parsed_data)
+
+        if not all_parsed_data:
+            raise HTTPException(status_code=400, detail="Nie znaleziono danych do przetworzenia w podanych plikach tekstowych.")
         
-        # Dodaj zadanie w tle: zaktualizuj stronę Notion o nową tabelę
-        background_tasks.add_task(update_notion_page_with_table, page_id, parsed_data)
+        background_tasks.add_task(update_notion_page_with_table, page_id, all_parsed_data)
 
-        # Główne zadanie: wygeneruj i zwróć plik Excel do pobrania
-        excel_stream = create_excel_file_stream(parsed_data)
-        headers = {'Content-Disposition': 'attachment; filename="BIK_Raport.xlsx"'}
+        excel_stream = create_excel_file_stream(all_parsed_data)
+        headers = {'Content-Disposition': 'attachment; filename="BIK_Raport_łączony.xlsx"'}
         return StreamingResponse(excel_stream, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
 
     except Exception as e:
