@@ -1,4 +1,4 @@
-# server.py (Final Intelligent Error Version)
+# server.py (Final Production Version)
 from fastapi import FastAPI, Request, HTTPException, Query
 from notion_client import Client
 import httpx
@@ -44,19 +44,10 @@ async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str
             response.raise_for_status()
             pdf_bytes = response.content
 
-        result_dict = parse_bik_pdf(pdf_bytes, source=source)
-        parsed_data = result_dict.get("rows")
-        lines_read = result_dict.get("lines_read", 0)
-        active_lines_found = result_dict.get("active_lines_found", False)
+        parsed_data = parse_bik_pdf(pdf_bytes, source=source)
 
         if not parsed_data:
-            if lines_read < 10:
-                error_detail = "DIAGNOZA: Parser nie był w stanie odczytać prawie żadnego tekstu z pliku PDF. Plik jest najprawdopodobniej skanem (obrazem)."
-            elif not active_lines_found:
-                error_detail = f"DIAGNOZA: Odczytano {lines_read} linii tekstu z PDF, ale NIE ZNALEZIONO w nich sekcji 'Zobowiązania finansowe - w trakcie spłaty'. Sprawdź, czy na pewno ten raport zawiera tę sekcję lub czy nie ma ona innej nazwy."
-            else:
-                error_detail = f"DIAGNOZA: Odczytano {lines_read} linii i ZNALEZIONO sekcję 'Zobowiązania...', ale wewnątrz tej sekcji nie znaleziono żadnych linii z datami w formacie DD.MM.RRRR. Sprawdź format dat w pliku."
-            raise HTTPException(status_code=400, detail=error_detail)
+            raise HTTPException(status_code=400, detail="Nie znaleziono danych do przetworzenia w pliku PDF")
 
         return {"message": f"Plik dla strony {page_id} został przetworzony pomyślnie. Znaleziono {len(parsed_data)} rekordów."}
 
