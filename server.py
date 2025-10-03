@@ -1,4 +1,4 @@
-# server.py (Final Version: XLS Download + Notion Table)
+# server.py (Final Version: XLS Download + Notion Table for TXT files)
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from notion_client import Client
@@ -7,9 +7,9 @@ import pandas as pd
 from io import BytesIO
 import os
 
-from parse_bik import parse_bik_pdf
+from parse_bik import parse_bik_txt
 
-NOTION_PDF_PROPERTY_NAME = "Raporty BIK"
+NOTION_TXT_PROPERTY_NAME = "Raporty BIK"
 NOTION_XLS_PROPERTY_NAME = "BIK Raport" # Ta kolumna pozostaje nieużywana
 NOTION_SOURCE_PROPERTY_NAME = "Źródło"
 
@@ -58,25 +58,25 @@ async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str
         page_data = notion.pages.retrieve(page_id=page_id)
         props = page_data.get('properties', {})
         
-        pdf_property = props.get(NOTION_PDF_PROPERTY_NAME, {})
-        pdf_files = pdf_property.get('files', [])
+        txt_property = props.get(NOTION_TXT_PROPERTY_NAME, {})
+        txt_files = txt_property.get('files', [])
 
-        if not pdf_files:
-            return {"message": f"ℹ️ Brak akcji (brak pliku PDF w kolumnie '{NOTION_PDF_PROPERTY_NAME}')"}
+        if not txt_files:
+            return {"message": f"ℹ️ Brak akcji (brak pliku .TXT w kolumnie '{NOTION_TXT_PROPERTY_NAME}')"}
         
-        pdf_url = pdf_files[0]['file']['url']
+        txt_url = txt_files[0]['file']['url']
         source_property = props.get(NOTION_SOURCE_PROPERTY_NAME, {})
         source = source_property.get('select', {}).get('name', 'auto')
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(pdf_url)
+            response = await client.get(txt_url)
             response.raise_for_status()
-            pdf_bytes = response.content
+            text_content = response.text
 
-        parsed_data = parse_bik_pdf(pdf_bytes, source=source)
+        parsed_data = parse_bik_txt(text_content, source=source)
 
         if not parsed_data:
-            raise HTTPException(status_code=400, detail="Nie znaleziono danych do przetworzenia w pliku PDF.")
+            raise HTTPException(status_code=400, detail="Nie znaleziono danych do przetworzenia w pliku tekstowym.")
         
         # Dodaj zadanie w tle: zaktualizuj stronę Notion o nową tabelę
         background_tasks.add_task(update_notion_page_with_table, page_id, parsed_data)
