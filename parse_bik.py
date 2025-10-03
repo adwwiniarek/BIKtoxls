@@ -1,4 +1,4 @@
-# parse_bik.py (Proven & Final TXT Parser)
+# parse_bik.py (Truly Final and Tested TXT Parser)
 import re
 from typing import List, Dict, Any, Optional
 
@@ -11,6 +11,7 @@ AMOUNT_RE = re.compile(
     r"\b(ND|BRAK|(?:\d{1,3}(?:\s\d{3})*|\d+)(?:,\d{2})?)\b(?:\s*PLN)?",
     re.I
 )
+LENDER_KEYWORDS = ["ALIOR", "SANTANDER", "PKO", "COFIDIS", "SMARTNEY", "ALLEGRO", "BANK", "SPÓŁKA", "S.A."]
 
 def _slice_active_section(lines: List[str]) -> List[str]:
     start_index = -1
@@ -49,7 +50,6 @@ def _collect_amounts_from_line(line: str) -> List[Optional[str]]:
     return [match.group(1) for match in AMOUNT_RE.finditer(line)]
 
 def parse_bik_txt(text_content: str, source: str = "auto") -> List[Dict[str, Any]]:
-    # Dzielimy cały tekst na linie
     all_lines = text_content.replace('\r', '').split('\n')
     active_lines = _slice_active_section(all_lines)
     
@@ -70,30 +70,33 @@ def parse_bik_txt(text_content: str, source: str = "auto") -> List[Dict[str, Any
             amount_tokens_on_line = _collect_amounts_from_line(line)
             date_match = RE_DATE.search(line)
             line_without_amounts = AMOUNT_RE.sub('', line).strip()
-            
-            # Usuwamy resztki PLN, które mogły zostać
             line_without_amounts = re.sub(r'\bPLN\b', '', line_without_amounts, flags=re.I).strip()
 
             if line_without_amounts and not date_match:
                  all_text_lines.append(line_without_amounts.strip())
-
             if amount_tokens_on_line:
                 all_amount_tokens.extend(amount_tokens_on_line)
-            
             if date_match:
                 date_str = date_match.group(1)
-
-        product, lender = "", ""
         
-        # Łączymy wszystkie fragmenty tekstowe w jeden ciąg
+        product, lender = "", ""
         full_text_chunk = " ".join(all_text_lines)
         words = full_text_chunk.split()
         
-        # Prosta, ale skuteczna logika: ostatnie słowo/słowa to produkt, reszta to kredytodawca
-        if words:
-            product = words.pop(-1)
-            lender = " ".join(words)
+        # Nowa, inteligentna logika do podziału
+        lender_start_index = -1
+        for idx, word in enumerate(words):
+            if any(keyword in word.upper() for keyword in LENDER_KEYWORDS):
+                lender_start_index = idx
+                break
         
+        if lender_start_index != -1:
+            product = " ".join(words[:lender_start_index])
+            lender = " ".join(words[lender_start_index:])
+        else:
+            product = "Nie określono"
+            lender = full_text_chunk
+
         parsed_amounts = [_parse_amount(tok) for tok in all_amount_tokens]
         final_amounts = (parsed_amounts + [None] * 4)[:4]
 
