@@ -16,7 +16,7 @@ KNOWN_PRODUCTS = frozenset([
 RE_SECTION_START = re.compile(r"Zobowiązania finansowe - w trakcie spłaty", re.I)
 RE_SECTION_END = re.compile(r"^(Łącznie|Zobowiązania finansowe - zamknięte|Informacje dodatkowe|Informacje szczegółowe)", re.I)
 RE_DATE_START = re.compile(r"^\d{2}\.\d{2}\.\d{4}")
-RE_LENDER = re.compile(r"^[A-ZĄĆĘŁŃÓŚŹŻ\s\d\.\-/]+$") # Wzorzec dla wierzyciela (wielkie litery)
+RE_LENDER = re.compile(r"^[A-ZĄĆĘŁŃÓŚŹŻ\s\d\.\-/]+$") # Wzorzec dla wierzyciela (wielkie litery, cyfry, spacja, kropka, myślnik)
 AMOUNT_RE = re.compile(r"\b(ND|BRAK|(?:\d{1,3}(?:\s\d{3})*|\d+)(?:,\d{2})?)\b(?:\s*PLN)?", re.I)
 
 
@@ -30,7 +30,6 @@ def _read_lines_from_pdf(pdf_bytes: bytes) -> List[str]:
     lines = []
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page in doc:
-            # Użycie "blocks" jest bardziej niezawodne niż "text"
             blocks = page.get_text("blocks", sort=True)
             for b in blocks:
                 block_text = b[4]
@@ -44,29 +43,22 @@ def _slice_active_debt_section(all_lines: List[str]) -> List[str]:
     """Wyodrębnia tylko sekcję z aktywnymi zobowiązaniami."""
     try:
         start_index = next(i for i, line in enumerate(all_lines) if RE_SECTION_START.search(line))
-        
         end_index = len(all_lines)
         for i in range(start_index + 1, len(all_lines)):
             if RE_SECTION_END.search(all_lines[i]):
                 end_index = i
                 break
-        
-        # Ignoruj linię z nagłówkiem sekcji
         return all_lines[start_index + 1:end_index]
     except StopIteration:
-        return [] # Sekcja nie została znaleziona
+        return []
 
 def _parse_amount(token: Optional[str]) -> Optional[float]:
     """Konwertuje tekst na kwotę, obsługując 'BRAK' i 'ND'."""
-    if token is None:
-        return None
+    if token is None: return None
     token_upper = token.upper()
-    if "ND" in token_upper:
-        return None
-    if "BRAK" in token_upper:
-        return 0.0
+    if "ND" in token_upper: return None
+    if "BRAK" in token_upper: return 0.0
     
-    # Usuwa PLN i białe znaki, zamienia przecinek na kropkę
     cleaned_token = token.replace("PLN", "").strip()
     cleaned_token = re.sub(r'\s', '', cleaned_token)
     cleaned_token = cleaned_token.replace(",", ".")
@@ -77,67 +69,78 @@ def _parse_amount(token: Optional[str]) -> Optional[float]:
         return None
 
 def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]]:
-    """
-    Główna funkcja parsująca. Implementuje logikę maszyny stanów.
-    """
+    """Główna funkcja parsująca. Implementuje logikę maszyny stanów."""
     all_lines = _read_lines_from_pdf(pdf_bytes)
     debt_lines = _slice_active_debt_section(all_lines)
 
     if not debt_lines:
         return []
 
-    final_records = []
-    
-    # --- Maszyna Stanów ---
+    final_records: List[Dict[str, Any]] = []
     state = "LOOKING_FOR_LENDER"
-    current_record_data = {}
+    current_record_data: Dict[str, List[str]] = {}
+
+    def finalize_record():
+        """Funkcja pomocnicza do zapisu zebranego rekordu."""
+        if not current_record_data:
+            return
+
+        wierzyciel = " ".join(current_record_data.get("wierzyciel_lines", [])).strip()
+        produkt = " ".join(current_record_data.get("produkt_lines", [])).strip()
+        
+        # Weryfikacja z katalogiem produktów
+        found_in_catalog = any(known_prod in produkt for known_prod in KNOWN_PRODUCTS)
+
+        date_line = current_record_data.get("data_line", [""])[0]
+        date_match = RE_DATE_START.match(date_line)
+        date_str = date_match.group(0) if date_match else ""
+        
+        amount_tokens = AMOUNT_RE.findall(date_line)
+        amounts = (list(map(_parse_amount, amount_tokens)) + [None] * 4)[:4]
+
+        if wierzyciel and produkt and date_str:
+            final_records.append({
+                "Źródło": source,
+                "Rodzaj_produktu": produkt,
+                "Kredytodawca": wierzyciel,
+                "Zawarcie_umowy": date_str,
+                "Pierwotna_kwota": amounts[0],
+                "Pozostało_do_spłaty": amounts[1],
+                "Kwota_raty": amounts[2],
+                "Suma_zaległości": amounts[3],
+                "Produkt_zweryfikowany": found_in_catalog
+            })
 
     for line in debt_lines:
+        is_lender = bool(RE_LENDER.match(line)) and not RE_DATE_START.match(line)
+        is_data_line = bool(RE_DATE_START.match(line))
+
+        if is_data_line:
+            if current_record_data:
+                current_record_data["data_line"] = [line]
+                finalize_record()
+            current_record_data = {}
+            state = "LOOKING_FOR_LENDER"
+            continue
+
         if state == "LOOKING_FOR_LENDER":
-            if RE_LENDER.match(line):
+            if is_lender:
                 current_record_data.setdefault("wierzyciel_lines", []).append(line)
-            else: # Pierwsza linia, która nie jest wielkimi literami
-                if "wierzyciel_lines" in current_record_data:
-                    state = "LOOKING_FOR_PRODUCT"
-                    # Ta linia już należy do produktu, więc przetwarzamy ją od razu
-                    current_record_data.setdefault("produkt_lines", []).append(line)
-                # Ignorujemy linie "śmieci" przed znalezieniem pierwszego wierzyciela
-
-        elif state == "LOOKING_FOR_PRODUCT":
-            if not RE_DATE_START.match(line):
+            elif current_record_data:
+                state = "LOOKING_FOR_PRODUCT"
                 current_record_data.setdefault("produkt_lines", []).append(line)
-            else: # Znaleziono linię z datą, kończymy zbieranie produktu
-                state = "PROCESSING_DATA_LINE"
-                # Ta linia zawiera dane, więc przetwarzamy ją od razu
-                
-                # Złącz zebrane linie w finalne ciągi znaków
-                wierzyciel = " ".join(current_record_data.get("wierzyciel_lines", []))
-                produkt = " ".join(current_record_data.get("produkt_lines", []))
-                
-                # Weryfikacja z katalogiem produktów
-                found_in_catalog = any(known_prod in produkt for known_prod in KNOWN_PRODUCTS)
-
-                # Ekstrakcja danych liczbowych
-                date_str = RE_DATE_START.match(line).group(0)
-                amount_tokens = AMOUNT_RE.findall(line)
-                
-                # Zapewnij, że zawsze są 4 wartości, dopełniając None
-                amounts = (list(map(_parse_amount, amount_tokens)) + [None] * 4)[:4]
-
-                final_records.append({
-                    "Źródło": source,
-                    "Rodzaj_produktu": produkt,
-                    "Kredytodawca": wierzyciel,
-                    "Zawarcie_umowy": date_str,
-                    "Pierwotna_kwota": amounts[0],
-                    "Pozostało_do_spłaty": amounts[1],
-                    "Kwota_raty": amounts[2],
-                    "Suma_zaległości": amounts[3],
-                    "Produkt_zweryfikowany": found_in_catalog
-                })
-
-                # Reset i powrót do szukania kolejnego wierzyciela
-                current_record_data = {}
+        
+        elif state == "LOOKING_FOR_PRODUCT":
+            if is_lender and not current_record_data.get("produkt_lines"): # Nowy blok wierzyciela bez produktu
+                finalize_record()
+                current_record_data = {"wierzyciel_lines": [line]}
                 state = "LOOKING_FOR_LENDER"
+            else:
+                current_record_data.setdefault("produkt_lines", []).append(line)
 
+    # Zapisz ostatni rekord, jeśli istnieje
+    if current_record_data.get("wierzyciel_lines") and not current_record_data.get("data_line"):
+        # Heurystyka: jeśli nie znaleziono linii danych, a coś zebrano, ignoruj, by uniknąć niekompletnych rekordów
+        pass
+        
     return final_records
