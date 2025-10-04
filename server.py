@@ -1,104 +1,67 @@
-# server.py (Final Version for TXT: XLS Download + Notion Table)
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
-from fastapi.responses import StreamingResponse
-from notion_client import Client
-import httpx
+from flask import Flask, request, jsonify, send_file
+from parse_bik import parse_bik_pdf
 import pandas as pd
-from io import BytesIO
-import os
-import re
+import io
+import logging
 
-from parse_bik import parse_bik_txt
+# Konfiguracja loggera, aby widzieć błędy na Render
+logging.basicConfig(level=logging.INFO)
 
-NOTION_TXT_PROPERTY_NAME = "Raporty BIK"
-NOTION_CLIENT_NAME_PROPERTY = "Name" 
+app = Flask(__name__)
 
-app = FastAPI()
-notion_token = os.environ.get("NOTION_TOKEN")
-notion = Client(auth=notion_token)
+@app.route('/process_bik', methods=['POST'])
+def process_bik_report():
+    """
+    Endpoint, który przyjmuje plik PDF, parsuje go i zwraca plik XLSX.
+    """
+    logging.info("Otrzymano nowe żądanie do /process_bik")
 
-def create_excel_file_stream(data):
-    output = BytesIO()
-    df = pd.DataFrame(data)
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='BIK_Raport')
-    output.seek(0)
-    return output
+    if 'file' not in request.files:
+        logging.error("Brak pliku w żądaniu.")
+        return jsonify({"error": "Brak pliku w żądaniu."}), 400
 
-def convert_data_to_notion_table(data):
-    if not data: return None
-    header_keys = list(data[0].keys())
-    header_row = {"type": "table_row", "table_row": {"cells": [[{"type": "text", "text": {"content": str(key)}}] for key in header_keys]}}
-    data_rows = []
-    for item in data:
-        row_cells = []
-        for key in header_keys:
-            value = item.get(key)
-            cell_content = [{"type": "text", "text": {"content": str(value) if value is not None else ""}}]
-            row_cells.append(cell_content)
-        data_rows.append({"type": "table_row", "table_row": {"cells": row_cells}})
-    return {"type": "table", "table": {"table_width": len(header_keys), "has_column_header": True, "has_row_header": False, "children": [header_row, *data_rows]}}
+    file = request.files['file']
+    source = request.form.get('source', 'auto') # Pobiera źródło z formularza
 
-def update_notion_page_with_table(page_id: str, data: list):
+    if file.filename == '':
+        logging.error("Nie wybrano pliku.")
+        return jsonify({"error": "Nie wybrano pliku."}), 400
+
     try:
-        notion_table_block = convert_data_to_notion_table(data)
-        if notion_table_block:
-            notion.blocks.children.append(block_id=page_id, children=[notion_table_block])
-            print(f"Pomyślnie dodano tabelę do strony Notion: {page_id}")
-    except Exception as e:
-        print(f"Błąd podczas aktualizacji strony Notion {page_id} w tle: {e}")
-
-@app.get('/notion/poll-one')
-async def notion_poll_one(page_id: str = Query(..., alias="page_id"), x_key: str = Query(..., alias="x_key"), background_tasks: BackgroundTasks = BackgroundTasks()):
-    try:
-        if not page_id:
-            raise HTTPException(status_code=400, detail="Brak page_id w adresie URL.")
-
-        page_data = notion.pages.retrieve(page_id=page_id)
-        props = page_data.get('properties', {})
+        pdf_bytes = file.read()
+        logging.info(f"Odczytano {len(pdf_bytes)} bajtów z pliku '{file.filename}'. Źródło: {source}")
         
-        txt_property = props.get(NOTION_TXT_PROPERTY_NAME, {})
-        txt_files = txt_property.get('files', [])
+        # Uruchomienie parsera
+        parsed_data = parse_bik_pdf(pdf_bytes, source)
+        
+        if not parsed_data:
+            logging.warning("Parser nie zwrócił żadnych danych.")
+            # Zwróć pusty plik excel, aby uniknąć błędu w Notion
+            df = pd.DataFrame()
+        else:
+            logging.info(f"Parser zwrócił {len(parsed_data)} rekordów.")
+            df = pd.DataFrame(parsed_data)
 
-        if not txt_files:
-            return {"message": f"ℹ️ Brak akcji (brak plików .TXT w kolumnie '{NOTION_TXT_PROPERTY_NAME}')"}
+        # Stworzenie pliku Excel w pamięci
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Zobowiazania')
         
-        all_parsed_data = []
-        async with httpx.AsyncClient() as client:
-            for file_obj in txt_files:
-                txt_url = file_obj['file']['url']
-                file_name = file_obj.get('name', '').lower()
-                
-                source = "prywatny"
-                if "firmowy" in file_name:
-                    source = "firmowy"
+        output.seek(0)
 
-                response = await client.get(txt_url)
-                response.raise_for_status()
-                text_content = response.text
-
-                parsed_data = parse_bik_txt(text_content, source=source)
-                if parsed_data:
-                    all_parsed_data.extend(parsed_data)
-
-        if not all_parsed_data:
-            raise HTTPException(status_code=400, detail="Nie znaleziono danych do przetworzenia w podanych plikach tekstowych.")
+        logging.info("Pomyślnie utworzono plik Excel. Odsyłanie odpowiedzi.")
         
-        background_tasks.add_task(update_notion_page_with_table, page_id, all_parsed_data)
-
-        client_name = "Raport"
-        name_property = props.get(NOTION_CLIENT_NAME_PROPERTY, {}).get('title', [])
-        if name_property:
-            client_name = name_property[0].get('plain_text', 'Raport')
-        
-        safe_client_name = re.sub(r'[\\/*?:"<>|]', "", client_name)
-        filename = f"{safe_client_name} wierzytelnosci.xlsx"
-        
-        excel_stream = create_excel_file_stream(all_parsed_data)
-        
-        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-        
-        return StreamingResponse(excel_stream, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='raport_wynikowy.xlsx'
+        )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd serwera: {str(e)}")
+        logging.error(f"Wystąpił krytyczny błąd podczas przetwarzania: {e}", exc_info=True)
+        return jsonify({"error": f"Wystąpił wewnętrzny błąd serwera: {e}"}), 500
+
+if __name__ == '__main__':
+    # Ta sekcja jest do testów lokalnych, nie jest używana przez Gunicorn na Render
+    app.run(debug=True, port=5001)
