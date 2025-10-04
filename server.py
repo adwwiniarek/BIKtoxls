@@ -7,12 +7,16 @@ import logging
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-@app.route('/process_bik', methods=['POST'])
+# ##################################################################
+# ## JEDYNA ZMIANA JEST TUTAJ - ZMIANA ADRESU ENDPOINTU          ###
+# ##################################################################
+@app.route('/notion/poll-one', methods=['POST'])
 def process_bik_report():
     """
     Endpoint, który przyjmuje plik PDF, parsuje go i zwraca plik XLSX.
+    Teraz nasłuchuje na starym adresie URL.
     """
-    logging.info("Otrzymano nowe żądanie do /process_bik")
+    logging.info("Otrzymano nowe żądanie do /notion/poll-one")
 
     if 'file' not in request.files:
         logging.error("Błąd: Brak pliku w żądaniu.")
@@ -29,7 +33,6 @@ def process_bik_report():
         pdf_bytes = file.read()
         logging.info(f"Odczytano {len(pdf_bytes)} bajtów z pliku '{file.filename}'. Źródło: {source}")
         
-        # Uruchomienie nowego, inteligentnego parsera
         parsed_data = parse_bik_pdf(pdf_bytes, source)
         
         if not parsed_data:
@@ -39,7 +42,6 @@ def process_bik_report():
             logging.info(f"Parser zwrócił {len(parsed_data)} rekordów.")
             df = pd.DataFrame(parsed_data)
 
-        # Stworzenie pliku Excel w pamięci
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Zobowiazania')
