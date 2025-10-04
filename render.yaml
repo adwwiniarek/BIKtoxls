@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: restrukturyzacja-notion
+    env: python
+    plan: starter
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    autoDeploy: true
+    runtime: "python3.11"
+    envVars:
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NOTION_VERSION
+        value: "2025-09-03"
+      - key: DEFAULT_TIMEZONE
+        value: "Europe/Warsaw"
+      - key: LOG_LEVEL
+        value: "INFO"
+      - key: ALLOW_ORIGINS
+        value: "*"
+      # opcjonalne – dodaj jesli chcesz wymusić konkretne źródła
+      # - key: NOTION_DATA_SOURCE_ID_DEBTS
+      #   value: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      # - key: NOTION_DATA_SOURCE_ID_BANKS
+      #   value: "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      # - key: NOTION_WEBHOOK_SECRET
+      #   sync: false
