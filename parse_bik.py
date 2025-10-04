@@ -16,12 +16,12 @@ KNOWN_PRODUCTS = frozenset([
 RE_SECTION_START = re.compile(r"Zobowiązania finansowe - w trakcie spłaty", re.I)
 RE_SECTION_END = re.compile(r"^(Łącznie|Zobowiązania finansowe - zamknięte|Informacje dodatkowe|Informacje szczegółowe)", re.I)
 RE_DATE_START = re.compile(r"^\d{2}\.\d{2}\.\d{4}")
-RE_LENDER = re.compile(r"^[A-ZĄĆĘŁŃÓŚŹŻ\s\d\.\-/]+$") # Wzorzec dla wierzyciela (wielkie litery, cyfry, spacja, kropka, myślnik)
+RE_LENDER = re.compile(r"^[A-ZĄĆĘŁŃÓŚŹŻ\s\d\.\-/]+$")
 AMOUNT_RE = re.compile(r"\b(ND|BRAK|(?:\d{1,3}(?:\s\d{3})*|\d+)(?:,\d{2})?)\b(?:\s*PLN)?", re.I)
 
 
 def _deep_clean_text(text: str) -> str:
-    """Normalizuje i czyści tekst z niestandardowych znaków."""
+    """Normalizuje i czyści tekst."""
     text = unicodedata.normalize('NFKD', text)
     return re.sub(r'\s+', ' ', text).strip()
 
@@ -82,23 +82,20 @@ def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]
 
     def finalize_record():
         """Funkcja pomocnicza do zapisu zebranego rekordu."""
-        if not current_record_data:
-            return
+        if not current_record_data: return
 
         wierzyciel = " ".join(current_record_data.get("wierzyciel_lines", [])).strip()
         produkt = " ".join(current_record_data.get("produkt_lines", [])).strip()
-        
-        # Weryfikacja z katalogiem produktów
-        found_in_catalog = any(known_prod in produkt for known_prod in KNOWN_PRODUCTS)
-
         date_line = current_record_data.get("data_line", [""])[0]
+        
         date_match = RE_DATE_START.match(date_line)
         date_str = date_match.group(0) if date_match else ""
         
-        amount_tokens = AMOUNT_RE.findall(date_line)
-        amounts = (list(map(_parse_amount, amount_tokens)) + [None] * 4)[:4]
-
         if wierzyciel and produkt and date_str:
+            found_in_catalog = any(known_prod in produkt for known_prod in KNOWN_PRODUCTS)
+            amount_tokens = AMOUNT_RE.findall(date_line)
+            amounts = (list(map(_parse_amount, amount_tokens)) + [None] * 4)[:4]
+
             final_records.append({
                 "Źródło": source,
                 "Rodzaj_produktu": produkt,
@@ -115,32 +112,23 @@ def parse_bik_pdf(pdf_bytes: bytes, source: str = "auto") -> List[Dict[str, Any]
         is_lender = bool(RE_LENDER.match(line)) and not RE_DATE_START.match(line)
         is_data_line = bool(RE_DATE_START.match(line))
 
+        if state == "LOOKING_FOR_LENDER":
+            if is_lender:
+                current_record_data.setdefault("wierzyciel_lines", []).append(line)
+            elif current_record_data:
+                state = "LOOKING_FOR_PRODUCT"
+                if not is_data_line:
+                    current_record_data.setdefault("produkt_lines", []).append(line)
+        
+        elif state == "LOOKING_FOR_PRODUCT":
+            if not is_data_line:
+                current_record_data.setdefault("produkt_lines", []).append(line)
+
         if is_data_line:
             if current_record_data:
                 current_record_data["data_line"] = [line]
                 finalize_record()
             current_record_data = {}
             state = "LOOKING_FOR_LENDER"
-            continue
-
-        if state == "LOOKING_FOR_LENDER":
-            if is_lender:
-                current_record_data.setdefault("wierzyciel_lines", []).append(line)
-            elif current_record_data:
-                state = "LOOKING_FOR_PRODUCT"
-                current_record_data.setdefault("produkt_lines", []).append(line)
-        
-        elif state == "LOOKING_FOR_PRODUCT":
-            if is_lender and not current_record_data.get("produkt_lines"): # Nowy blok wierzyciela bez produktu
-                finalize_record()
-                current_record_data = {"wierzyciel_lines": [line]}
-                state = "LOOKING_FOR_LENDER"
-            else:
-                current_record_data.setdefault("produkt_lines", []).append(line)
-
-    # Zapisz ostatni rekord, jeśli istnieje
-    if current_record_data.get("wierzyciel_lines") and not current_record_data.get("data_line"):
-        # Heurystyka: jeśli nie znaleziono linii danych, a coś zebrano, ignoruj, by uniknąć niekompletnych rekordów
-        pass
-        
+            
     return final_records
