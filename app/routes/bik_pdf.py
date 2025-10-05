@@ -7,7 +7,7 @@ import httpx, os
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from ..notion_client import NotionClient, NotionError
-from services.parse_bik import parse_bik_pdf  # <— Twój parser
+from services.bik_parser import parse_bik_pdf  # <— Twój parser
 
 router = APIRouter()
 
