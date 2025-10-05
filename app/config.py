@@ -1,17 +1,10 @@
-from pydantic import BaseModel
 import os
 
-class Settings(BaseModel):
-    notion_token: str = os.getenv("NOTION_TOKEN", "")
-    notion_version: str = os.getenv("NOTION_VERSION", "2025-09-03")
-    default_timezone: str = os.getenv("DEFAULT_TIMEZONE", "Europe/Warsaw")
-    log_level: str = os.getenv("LOG_LEVEL", "INFO")
-    allow_origins: str = os.getenv("ALLOW_ORIGINS", "*")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
+NOTION_VERSION = os.getenv("NOTION_VERSION", "2025-09-03")
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "Europe/Warsaw")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+ALLOW_ORIGINS = os.getenv("ALLOW_ORIGINS", "*")
 
-    # Opcjonalnie – znane data_source_id dla wygody
-    ds_debts: str | None = os.getenv("NOTION_DATA_SOURCE_ID_DEBTS")
-    ds_banks: str | None = os.getenv("NOTION_DATA_SOURCE_ID_BANKS")
-
-    webhook_secret: str | None = os.getenv("NOTION_WEBHOOK_SECRET")
-
-settings = Settings()
+# Opcjonalny klucz do ochrony endpointu (jeśli ustawisz w Render)
+X_API_KEY = os.getenv("X_API_KEY", "")
