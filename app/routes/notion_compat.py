@@ -1,4 +1,4 @@
-# routes/notion_compat.py
+# GET /notion/poll-one – zgodny ze starym URL, z trybem debug
 from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 import httpx
 import fitz  # PyMuPDF
 from services.bik_parser import parse_bik_pdf
-from app.notion_client import NotionClient, NotionError  # mamy app/… więc tak importujemy
+from app.notion_client import NotionClient, NotionError
 
 router = APIRouter()
 
@@ -17,17 +17,7 @@ def _fetch_url(url: str) -> bytes:
         r.raise_for_status()
         return r.content
 
-def _filename_from_url(url: str) -> str:
-    try:
-        return url.split("?")[0].split("/")[-1] or "plik.pdf"
-    except Exception:
-        return "plik.pdf"
-
 def _bik_pdfs_from_notion(page_id: str) -> List[tuple[str, bytes]]:
-    """
-    Pobiera pliki z właściwości **Raporty BIK** (typ Files) na stronie Notion.
-    Zwraca listę (nazwa, bytes).
-    """
     client = NotionClient()
     page = client.get_page(page_id)
     props = page.get("properties", {})
@@ -39,14 +29,13 @@ def _bik_pdfs_from_notion(page_id: str) -> List[tuple[str, bytes]]:
     out: List[tuple[str, bytes]] = []
     for f in files:
         name = f.get("name") or "raport.pdf"
-        ftype = f.get("type")
-        if ftype == "file":
+        t = f.get("type")
+        if t == "file":
             url = f["file"]["url"]
-        elif ftype == "external":
+        elif t == "external":
             url = f["external"]["url"]
         else:
             continue
-        # tylko PDF-y
         if not (name.lower().endswith(".pdf") or url.lower().endswith(".pdf")):
             continue
         out.append((name, _fetch_url(url)))
@@ -56,9 +45,6 @@ def _bik_pdfs_from_notion(page_id: str) -> List[tuple[str, bytes]]:
     return out
 
 def _build_xls(rows: List[Dict[str, Any]], filename: str = "BIK.xlsx") -> StreamingResponse:
-    """
-    Minimalny builder XLS (openpyxl) – jedna zakładka, scalone wszystkie wiersze.
-    """
     from openpyxl import Workbook
     from io import BytesIO
 
@@ -77,7 +63,6 @@ def _build_xls(rows: List[Dict[str, Any]], filename: str = "BIK.xlsx") -> Stream
         "Suma_zaległości",
     ]
     ws.append(headers)
-
     for r in rows:
         ws.append([
             r.get("Źródło"),
@@ -105,7 +90,7 @@ def notion_poll_one(
     x_key: Optional[str] = Query(None),
     debug: Optional[int] = Query(None),
 ):
-    # prosty „sekret” kompatybilny ze starymi wywołaniami
+    # opcjonalny „sekret” – działa tylko jeśli ustawisz NOTION_X_KEY w env
     required = os.getenv("NOTION_X_KEY")
     if required and x_key != required:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -113,9 +98,9 @@ def notion_poll_one(
     rows_all: List[Dict[str, Any]] = []
     pdfs = _bik_pdfs_from_notion(page_id)
 
+    # diagnostyka: ile PDF-ów i ile wierszy parser wyciągnął
     dbg: Dict[str, Any] = {"pdfs": len(pdfs), "rows": 0, "notes": []}
     for name, pdf_bytes in pdfs:
-        # notatka diagnostyczna: długość tekstu z 1. strony
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             t = doc[0].get_text("text") if len(doc) > 0 else ""
@@ -123,8 +108,7 @@ def notion_poll_one(
         except Exception:
             dbg["notes"].append({"file": name, "p1_len": None})
 
-        rows = parse_bik_pdf(pdf_bytes, source=name)
-        rows_all.extend(rows)
+        rows_all.extend(parse_bik_pdf(pdf_bytes, source=name))
 
     dbg["rows"] = len(rows_all)
 
