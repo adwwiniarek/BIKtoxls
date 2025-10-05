@@ -1,3 +1,4 @@
+# app/notion_client.py
 from __future__ import annotations
 import httpx
 from typing import Any, Dict, Optional, List
@@ -27,14 +28,13 @@ class NotionClient:
             raise NotionError(f"{r.status_code}: {r.text}")
         return r.json()
 
-    # --- Discovery ---
+    # --- Discovery: lista źródeł dla danej bazy ---
     def list_data_sources_for_database(self, database_id: str) -> List[dict]:
         r = self.http.get(f"{NOTION_API}/databases/{database_id}")
         data = self._handle(r)
-        # w wersji 2025-09-03 Notion zwraca listę data_sources przy bazie
         return data.get("data_sources", []) or []
 
-    # Heurystyka wyboru data source
+    # --- Heurystyka wyboru data source ---
     def choose_data_source(self, database_id: Optional[str], explicit_data_source_id: Optional[str]) -> str:
         if explicit_data_source_id:
             return explicit_data_source_id
@@ -45,13 +45,12 @@ class NotionClient:
             raise NotionError(f"Baza {database_id} nie ma żadnych data_sources w tej wersji API.")
         if len(ds_list) == 1:
             return ds_list[0]["id"]
-        # wieloźródłowa – wybierz to o nazwie 'Primary' lub pierwsze
         for ds in ds_list:
             if ds.get("name", "").lower() == "primary":
                 return ds["id"]
         return ds_list[0]["id"]
 
-    # --- Pages (create) ---
+    # --- Pages: create (parent = data_source_id) ---
     def create_page(self, data_source_id: str, properties: Dict[str, Any], children: Optional[list]=None, icon: Optional[dict]=None, cover: Optional[dict]=None) -> Any:
         payload = {
             "parent": {"type": "data_source_id", "data_source_id": data_source_id},
@@ -66,7 +65,7 @@ class NotionClient:
         r = self.http.post(f"{NOTION_API}/pages", json=payload)
         return self._handle(r)
 
-    # --- Data Sources (query) ---
+    # --- Data Sources: query ---
     def data_source_query(self, data_source_id: str, filter: Optional[dict]=None, sorts: Optional[list]=None, page_size: int=50, start_cursor: Optional[str]=None) -> Any:
         payload: Dict[str, Any] = {}
         if filter:
@@ -80,7 +79,7 @@ class NotionClient:
         r = self.http.post(f"{NOTION_API}/data_sources/{data_source_id}/query", json=payload)
         return self._handle(r)
 
-    # --- Search (data_source) ---
+    # --- Search: tylko data_source ---
     def search_data_sources(self, query: str, limit: int=10) -> List[dict]:
         payload = {
             "query": query,
@@ -91,7 +90,12 @@ class NotionClient:
         data = self._handle(r)
         return data.get("results", [])
 
-    # --- Update property (relation) example ---
+    # --- Pages: update properties ---
     def update_page_properties(self, page_id: str, properties: Dict[str, Any]) -> Any:
         r = self.http.patch(f"{NOTION_API}/pages/{page_id}", json={"properties": properties})
+        return self._handle(r)
+
+    # --- Pages: get one (używane w /notion/poll-one) ---
+    def get_page(self, page_id: str):
+        r = self.http.get(f"{NOTION_API}/pages/{page_id}")
         return self._handle(r)
