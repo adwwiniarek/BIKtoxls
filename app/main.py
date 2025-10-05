@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
-from .routes import health, bik, notion_webhook, notion_compat  # ← DODANE: notion_compat
+from .routes import health, bik, notion_webhook, bik_pdf  # ← bik_pdf: NOWA trasa PDF→XLS
 
 app = FastAPI(title="Restrukturyzacja – Notion (data_sources)", version="1.0.0")
 
@@ -16,6 +16,6 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-app.include_router(bik.router)
+app.include_router(bik.router)  # zostaje; NIE usuwamy
 app.include_router(notion_webhook.router)
-app.include_router(notion_compat.router)  # ← DODANE: rejestracja zgodności /notion/poll-one
+app.include_router(bik_pdf.router)  # rejestrujemy nowy endpoint
