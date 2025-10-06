@@ -1,1 +1,1 @@
-# umożliwia importowanie pakietu routes
+# Pusty plik __init__.py
